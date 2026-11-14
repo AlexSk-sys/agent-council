@@ -55,19 +55,25 @@ def scope_key(staged: bool, ref: str | None, path: str | None) -> str:
 
 
 def _spawn_review(project: Path) -> None:
-    args = [sys.executable, "-m", "council", "review", "--background",
-            "--project", str(project)]
+    # --project is a top-level flag and MUST precede the subcommand; after it,
+    # argparse rejects the whole call. Under DEVNULL that failure is invisible -
+    # this exact ordering bug killed the first background review silently.
+    args = [sys.executable, "-m", "council", "--project", str(project),
+            "review", "--background"]
+    log_dir = Path(project) / ".council"
+    log_dir.mkdir(parents=True, exist_ok=True)
     kwargs: dict = {
         "cwd": str(project),
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": subprocess.STDOUT,
         "close_fds": True,
     }
     if os.name == "nt":
         # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: survive this turn.
         kwargs["creationflags"] = 0x00000008 | 0x00000200
-    subprocess.Popen(args, **kwargs)
+    with (log_dir / "background.log").open("a", encoding="utf-8") as log:
+        kwargs["stdout"] = log
+        subprocess.Popen(args, **kwargs)
 
 
 def stop_hook(project: Path, cooldown_s: int = DEFAULT_COOLDOWN_S) -> int:

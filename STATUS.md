@@ -35,5 +35,14 @@ blockers. 52 unit tests green. Detection and repair both verified on a seeded bu
   the latest run and prints its synthesis.
 - **2026-11-14** — hooks wired into `~/.claude/settings.json` (Stop + UserPromptSubmit), all four
   previous hooks kept; `json.load` reports OK and lists all five commands. Pipe-test outside a git
-  repo: both return exit 0 with no output. `py -3 -m unittest discover -s tests` → 52 tests OK.
+  repo: both return exit 0 with no output. `py -3 -m unittest discover -s tests` → 54 tests OK.
   Pre-commit regenerated with `--if-changed` and fail-open on exit 1.
+- **2026-11-14** — full hook chain exercised for real in `sandbox/`: `{} | council hook --event
+  stop` → exit 0 → detached child → **new run dir + `3 agents, 947 chars of diff`** → review
+  finished in ~104 s → `state.json` got `worktree` (fingerprint, `decision: approve`, run_dir) and
+  `.council/pending.md` holds `APPROVE: 13 finding(s) with evidence`.
+- **2026-11-14** — bug found by that run: the spawn passed `--project` *after* the subcommand, so
+  argparse rejected it and the first detached child died silently under `DEVNULL` (no run dir, no
+  process). Fixed the argument order, redirected child output to `.council/background.log`, added
+  two regression tests. `sandbox/` sits under a folder that is not a git repo — `source/repos` has
+  no `.git`, so a session opened there has nothing to review; open the session inside a repo.

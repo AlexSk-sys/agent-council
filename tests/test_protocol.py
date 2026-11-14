@@ -20,7 +20,7 @@ from council.adapters import AgentConfig, _materialize_prompt
 from council.gitutil import is_noise
 from council.cli import _collect_diff, main
 from council.hooks import (
-    fingerprint, load_state, prompt_hook, save_state, stop_hook,
+    _spawn_review, fingerprint, load_state, prompt_hook, save_state, stop_hook,
 )
 from council.protocol import (
     Finding,
@@ -388,6 +388,21 @@ class TestHooks(unittest.TestCase):
                  mock.patch("council.hooks._spawn_review") as spawn:
                 stop_hook(root)
             spawn.assert_called_once()
+
+    def test_spawn_puts_project_before_subcommand(self):
+        """`council review --project X` is rejected by argparse; order matters."""
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("council.hooks.subprocess.Popen") as popen:
+            _spawn_review(Path(tmp))
+        args = popen.call_args[0][0]
+        self.assertLess(args.index("--project"), args.index("review"))
+        self.assertIn("--background", args)
+
+    def test_spawn_writes_a_log_instead_of_devnull(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("council.hooks.subprocess.Popen"):
+            _spawn_review(Path(tmp))
+            self.assertTrue((Path(tmp) / ".council" / "background.log").exists())
 
     def test_prompt_hook_prints_once_then_clears(self):
         with tempfile.TemporaryDirectory() as tmp:

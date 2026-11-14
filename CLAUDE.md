@@ -38,6 +38,10 @@ council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
 7. **Hooks must never break a turn.** `council hook` catches everything and returns 0. The Stop
    hook spawns a detached child; it does not wait for the review. Dedup is by diff hash, plus a
    300 s cooldown, because the hook fires after *every* assistant turn.
+8. **`--project` is a top-level flag, so it must come BEFORE the subcommand.** `council review
+   --project X` is rejected by argparse, and a background child dies silently that way. The
+   spawn now writes `.council/background.log` instead of `DEVNULL` — never pipe a detached child's
+   stderr to nowhere; that is how this bug hid.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.
