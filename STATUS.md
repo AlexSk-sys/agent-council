@@ -44,5 +44,14 @@ blockers. 52 unit tests green. Detection and repair both verified on a seeded bu
 - **2026-11-14** — bug found by that run: the spawn passed `--project` *after* the subcommand, so
   argparse rejected it and the first detached child died silently under `DEVNULL` (no run dir, no
   process). Fixed the argument order, redirected child output to `.council/background.log`, added
-  two regression tests. `sandbox/` sits under a folder that is not a git repo — `source/repos` has
-  no `.git`, so a session opened there has nothing to review; open the session inside a repo.
+  two regression tests.
+- **2026-11-14** — CORRECTION to an earlier entry: `C:\Users\AgentPC\source\repos` **is** a git
+  repository (branch `fix/bugs-and-ui-redesign`); a `Glob` for `.git/HEAD` missed the hidden dir and
+  I wrongly concluded it was not. The real cause of the silent Stop hook was different: that session's
+  cwd was `C:\Users\AgentPC` — the home directory, which is not under git.
+- **2026-11-14** — Stop hook now resolves the project from the session transcript when cwd is not a
+  repo. Verified on the live session transcript: `resolve_project` → `C:\Users\AgentPC\stream-cat`
+  (its topic is the animated stream cat; it edits `js/cat.js`). That folder had no `.git`
+  (593 files, 23.7 MB), so it was made a repository with a baseline commit `1ff90ac` — 9 tracked
+  files, `captures/` ignored — and `git_summary` now reports "git repository, clean tree".
+  `py -3 -m unittest discover -s tests` → 60 tests OK.

@@ -42,6 +42,10 @@ council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
    --project X` is rejected by argparse, and a background child dies silently that way. The
    spawn now writes `.council/background.log` instead of `DEVNULL` — never pipe a detached child's
    stderr to nowhere; that is how this bug hid.
+9. **The project is resolved from the transcript, not only from cwd.** `resolve_project` falls back
+   to the newest `file_path` in the session transcript when cwd is not a repo. A folder without
+   `.git` can never be reviewed; `council doctor` prints that in one line, and `git_summary` in
+   `gitutil.py` is the single place that wording lives.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

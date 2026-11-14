@@ -76,6 +76,76 @@ def _spawn_review(project: Path) -> None:
         subprocess.Popen(args, **kwargs)
 
 
+def _tail_lines(path: Path, max_bytes: int = 400_000, max_lines: int = 400) -> list[str]:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(-max_bytes, os.SEEK_END)
+            data = fh.read()
+    except OSError:
+        return []
+    return data.decode("utf-8", "replace").splitlines()[-max_lines:]
+
+
+def _edited_paths(lines: list[str]) -> list[Path]:
+    """File paths the session wrote to, newest first."""
+    found: list[Path] = []
+    for line in reversed(lines):
+        if '"file_path"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = (obj.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            raw = part.get("input")
+            if isinstance(raw, dict):
+                candidate = raw.get("file_path") or raw.get("path")
+                if isinstance(candidate, str) and candidate:
+                    found.append(Path(candidate))
+    return found[:20]
+
+
+def _repo_of(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return None
+    if proc.returncode == 0 and proc.stdout.strip():
+        return Path(proc.stdout.strip())
+    return None
+
+
+def resolve_project(payload: dict, cwd: Path) -> Path | None:
+    """Which repository this session is actually working on.
+
+    A session opened in a folder that is not a repo (the home directory, a
+    scratch folder) still edits real repositories. The hook payload carries the
+    transcript, so the repository is resolved from the files the session wrote,
+    newest first, instead of being guessed from cwd.
+    """
+    if _repo_of(cwd):
+        return Path(cwd).resolve()
+    transcript = payload.get("transcript_path")
+    if not transcript:
+        return None
+    for candidate in _edited_paths(_tail_lines(Path(transcript))):
+        repo = _repo_of(candidate)
+        if repo:
+            return repo.resolve()
+    return None
+
+
 def stop_hook(project: Path, cooldown_s: int = DEFAULT_COOLDOWN_S) -> int:
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -83,6 +153,11 @@ def stop_hook(project: Path, cooldown_s: int = DEFAULT_COOLDOWN_S) -> int:
         payload = {}
     if payload.get("stop_hook_active"):
         return 0
+
+    resolved = resolve_project(payload, Path(project))
+    if resolved is None:
+        return 0  # nothing this session touched lives in a git repo
+    project = resolved
 
     from .gitutil import collect_diff
 
@@ -111,7 +186,12 @@ def stop_hook(project: Path, cooldown_s: int = DEFAULT_COOLDOWN_S) -> int:
 
 
 def prompt_hook(project: Path) -> int:
-    pending = Path(project) / PENDING_REL
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except (json.JSONDecodeError, OSError):
+        payload = {}
+    resolved = resolve_project(payload, Path(project))
+    pending = Path(resolved or project) / PENDING_REL
     if not pending.exists():
         return 0
     try:

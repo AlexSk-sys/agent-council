@@ -213,6 +213,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     """Prove each harness answers in headless mode before trusting a council."""
     project = Path(args.project or ".").resolve()
     print(f"probing 3 harnesses in {project}")
+    from .gitutil import git_summary
+
+    print(f"  git: {git_summary(project)}")
     worst = 0
     for name in AGENTS:
         res = run_agent(name, "Reply with exactly one word: PONG",

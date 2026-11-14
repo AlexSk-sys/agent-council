@@ -54,6 +54,18 @@ all commits; set `COUNCIL_FAIL_CLOSED=1` to invert that.
 Cost control is built in: a diff is reviewed once (hash match) and at most one review starts per
 5 minutes per project. Raise the cooldown with `council hook --event stop --cooldown 900`.
 
+### Sessions opened outside a repository
+
+The hook resolves its project from the session's cwd. If that folder is not a git repository (the
+home directory, a scratch folder), it reads the session transcript from the hook payload and uses
+the repository of the files the session most recently wrote. Verified on a live session opened in
+`C:\Users\AgentPC` that edits `C:\Users\AgentPC\stream-cat\js\cat.js`: resolution returns
+`C:\Users\AgentPC\stream-cat`.
+
+A project that is not under git cannot be reviewed at all — there is no baseline to diff against.
+`council doctor` says exactly that in one line; `git init` plus one baseline commit is enough to
+put it in the rotation.
+
 ## Postures
 
 | posture | read | run commands | edit files |

@@ -80,3 +80,20 @@ def collect_diff(project: Path, staged: bool = False, ref: str | None = None,
 
 def head_commit(project: Path) -> str:
     return git(project, "rev-parse", "--short", "HEAD").strip() or "no-commit"
+
+
+def git_summary(project: Path) -> str:
+    """One line explaining whether the Stop hook can ever fire in this directory.
+
+    The hook resolves its project from the session's cwd. A session opened in a
+    folder that is not a git repository is silent by design, and that silence
+    looks exactly like a broken hook - so `council doctor` says it out loud.
+    """
+    inside = git(project, "rev-parse", "--is-inside-work-tree").strip() == "true"
+    if not inside:
+        return ("not a git repository - the Stop hook has nothing to diff here "
+                "and will stay silent; open the session inside a repo")
+    diff, _ = collect_diff(project)
+    if not diff.strip():
+        return "git repository, clean tree - the Stop hook will skip until a file changes"
+    return f"git repository, {len(diff)} chars of uncommitted diff - the Stop hook will review this"

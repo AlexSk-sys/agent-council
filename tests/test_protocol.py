@@ -17,10 +17,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from council.adapters import AgentConfig, _materialize_prompt
-from council.gitutil import is_noise
+from council.gitutil import git_summary, is_noise
 from council.cli import _collect_diff, main
 from council.hooks import (
-    _spawn_review, fingerprint, load_state, prompt_hook, save_state, stop_hook,
+    _spawn_review, fingerprint, load_state, prompt_hook, resolve_project,
+    save_state, stop_hook,
 )
 from council.protocol import (
     Finding,
@@ -410,7 +411,7 @@ class TestHooks(unittest.TestCase):
             (root / ".council").mkdir()
             (root / ".council" / "pending.md").write_text("BLOCK: 1 blocker\n", encoding="utf-8")
             buffer = io.StringIO()
-            with mock.patch("sys.stdout", buffer):
+            with mock.patch("sys.stdin", io.StringIO("{}")), mock.patch("sys.stdout", buffer):
                 prompt_hook(root)
             self.assertIn("1 blocker", buffer.getvalue())
             self.assertFalse((root / ".council" / "pending.md").exists())
@@ -425,6 +426,74 @@ class TestHooks(unittest.TestCase):
                 code = main(["--project", str(root), "review", "--if-changed"])
             review.assert_not_called()
             self.assertEqual(code, 2)
+
+
+class TestProjectResolution(unittest.TestCase):
+    """A session opened in the home directory still edits real repositories."""
+
+    def _repo(self, root: Path) -> Path:
+        repo = root / "proj"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+        return repo
+
+    def _transcript(self, root: Path, edited: Path) -> Path:
+        line = json.dumps({
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(edited)}}
+            ]}
+        })
+        path = root / "t.jsonl"
+        path.write_text(json.dumps({"type": "atis-latch"}) + "\n" + line + "\n", encoding="utf-8")
+        return path
+
+    def test_cwd_inside_repo_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root)
+            self.assertEqual(resolve_project({}, repo), repo.resolve())
+
+    def test_resolves_from_edited_files_when_cwd_is_not_a_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root)
+            home = root / "home"
+            home.mkdir()
+            transcript = self._transcript(root, repo / "a.py")
+            payload = {"transcript_path": str(transcript)}
+            self.assertEqual(resolve_project(payload, home), repo.resolve())
+
+    def test_returns_none_when_nothing_is_in_a_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            loose = root / "loose.py"
+            loose.write_text("x\n", encoding="utf-8")
+            payload = {"transcript_path": str(self._transcript(root, loose))}
+            self.assertIsNone(resolve_project(payload, home))
+
+
+class TestGitSummary(unittest.TestCase):
+    """Silence from the Stop hook has two very different causes; name them."""
+
+    def test_not_a_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn("not a git repository", git_summary(Path(tmp)))
+
+    def test_clean_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            self.assertIn("clean tree", git_summary(root))
+
+    def test_repo_with_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            self.assertIn("will review this", git_summary(root))
 
 
 class TestStore(unittest.TestCase):
