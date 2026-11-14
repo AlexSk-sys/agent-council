@@ -5,18 +5,23 @@ No network, no model calls. Run: py -3 -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from council.adapters import AgentConfig, _materialize_prompt
 from council.gitutil import is_noise
-from council.cli import _collect_diff
+from council.cli import _collect_diff, main
+from council.hooks import (
+    fingerprint, load_state, prompt_hook, save_state, stop_hook,
+)
 from council.protocol import (
     Finding,
     PeerReview,
@@ -327,6 +332,84 @@ class TestNoiseExclusion(unittest.TestCase):
             self.assertIn("real.py", diff)
             self.assertNotIn(".council", diff)
             self.assertNotIn("__pycache__", diff)
+
+
+class TestHooks(unittest.TestCase):
+    """Hooks must be free when nothing changed and must never break a turn."""
+
+    def _repo_with_change(self, root: Path) -> str:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+        diff, _ = _collect_diff(root, staged=False, ref=None, path=None)
+        return fingerprint(diff)
+
+    def test_fingerprint_stable(self):
+        self.assertEqual(fingerprint("abc"), fingerprint("abc"))
+        self.assertNotEqual(fingerprint("abc"), fingerprint("abd"))
+
+    def test_state_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_state(root, {"worktree": {"fingerprint": "f", "decision": "approve"}})
+            self.assertEqual(load_state(root)["worktree"]["decision"], "approve")
+
+    def test_stop_hook_no_diff_is_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            with mock.patch("sys.stdin", io.StringIO("{}")):
+                self.assertEqual(stop_hook(root), 0)
+            self.assertEqual(load_state(root), {})
+
+    def test_stop_hook_skips_already_reviewed_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fp = self._repo_with_change(root)
+            save_state(root, {"worktree": {"fingerprint": fp}, "last_spawn": 0})
+            with mock.patch("sys.stdin", io.StringIO("{}")), \
+                 mock.patch("council.hooks._spawn_review") as spawn:
+                stop_hook(root)
+            spawn.assert_not_called()
+
+    def test_stop_hook_respects_stop_hook_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with_change(root)
+            with mock.patch("sys.stdin", io.StringIO('{"stop_hook_active": true}')), \
+                 mock.patch("council.hooks._spawn_review") as spawn:
+                stop_hook(root)
+            spawn.assert_not_called()
+
+    def test_stop_hook_spawns_on_new_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with_change(root)
+            with mock.patch("sys.stdin", io.StringIO("{}")), \
+                 mock.patch("council.hooks._spawn_review") as spawn:
+                stop_hook(root)
+            spawn.assert_called_once()
+
+    def test_prompt_hook_prints_once_then_clears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "pending.md").write_text("BLOCK: 1 blocker\n", encoding="utf-8")
+            buffer = io.StringIO()
+            with mock.patch("sys.stdout", buffer):
+                prompt_hook(root)
+            self.assertIn("1 blocker", buffer.getvalue())
+            self.assertFalse((root / ".council" / "pending.md").exists())
+
+    def test_review_if_changed_short_circuits_without_model_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fp = self._repo_with_change(root)
+            save_state(root, {"worktree": {"fingerprint": fp, "decision": "block",
+                                           "run_dir": "seeded"}})
+            with mock.patch("council.protocol.run_diff_review") as review:
+                code = main(["--project", str(root), "review", "--if-changed"])
+            review.assert_not_called()
+            self.assertEqual(code, 2)
 
 
 class TestStore(unittest.TestCase):

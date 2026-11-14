@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import prompts
 from .adapters import AGENTS, POSTURES, AgentConfig, run_agent
 from .gitutil import collect_diff as _collect_diff
+from .hooks import fingerprint, load_state, save_state, scope_key, write_pending
 from .protocol import (
     SEVERITY_ORDER,
     CouncilOutcome,
@@ -92,9 +94,27 @@ def cmd_review(args: argparse.Namespace) -> int:
         diff = diff[: args.max_chars] + "\n... [diff truncated by council]"
     agents = _split_agents(args.agents)
     overrides = _load_overrides(project)
+
+    fp = fingerprint(diff)
+    scope = scope_key(args.staged, args.diff, args.path)
+    if args.if_changed:
+        last = load_state(project).get(scope) or {}
+        if last.get("fingerprint") == fp and last.get("decision") in ("approve", "block"):
+            print(f"council: unchanged since last review "
+                  f"({last['decision']}, {last.get('run_dir', '')})", file=sys.stderr)
+            return 0 if last["decision"] == "approve" else 2
+
     print(f"council review: {len(agents)} agents, {len(diff)} chars of diff", file=sys.stderr)
     out = run_diff_review(project, diff, stat, agents, overrides, on_done=_progress,
                           posture=args.posture)
+
+    state = load_state(project)
+    state[scope] = {"fingerprint": fp, "decision": out.decision,
+                    "run_dir": str(out.run_dir), "ts": time.time()}
+    save_state(project, state)
+    if args.background:
+        write_pending(project, out.decision, out.findings, out.run_dir)
+
     _print_outcome(out)
     if args.json:
         print(json.dumps({
@@ -125,6 +145,20 @@ def cmd_work(args: argparse.Namespace) -> int:
             "run_dir": str(out.run_dir),
         }, indent=2))
     return out.exit_code
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Entry point for Claude Code Stop / UserPromptSubmit hooks. Never raises."""
+    from . import hooks
+
+    project = Path(args.project or ".").resolve()
+    try:
+        if args.event == "stop":
+            return hooks.stop_hook(project, args.cooldown)
+        return hooks.prompt_hook(project)
+    except Exception as exc:  # a hook must never break the user's turn
+        print(f"council hook: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 0
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
@@ -237,8 +271,13 @@ def _install_hook(project: Path) -> int:
         "# Installed by council init. Bypass with COUNCIL_SKIP=1 or git commit --no-verify.\n"
         '[ -n "$COUNCIL_SKIP" ] && exit 0\n'
         'command -v council >/dev/null 2>&1 || exit 0\n'
-        "council review --staged\n"
+        "council review --staged --if-changed\n"
         "status=$?\n"
+        'if [ "$status" -eq 1 ]; then\n'
+        '  echo "council: review unavailable; allowing commit (COUNCIL_FAIL_CLOSED=1 to block)" >&2\n'
+        '  [ -n "$COUNCIL_FAIL_CLOSED" ] && exit 1\n'
+        "  exit 0\n"
+        "fi\n"
         'if [ "$status" -eq 2 ]; then echo "council: commit blocked by peer review" >&2; fi\n'
         'exit "$status"\n',
         encoding="utf-8",
@@ -315,7 +354,17 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--json", action="store_true")
     r.add_argument("--posture", choices=POSTURES, default="shell",
                    help="read_only | shell (run commands, no edits) | autonomous (full)")
+    r.add_argument("--if-changed", action="store_true",
+                   help="reuse the last verdict when the diff is byte-identical")
+    r.add_argument("--background", action="store_true",
+                   help="write .council/pending.md for the next turn (hook mode)")
     r.set_defaults(func=cmd_review)
+
+    h = sub.add_parser("hook", help="entry point for Claude Code hooks")
+    h.add_argument("--event", choices=["stop", "prompt"], required=True)
+    h.add_argument("--cooldown", type=int, default=300,
+                   help="minimum seconds between background reviews (default 300)")
+    h.set_defaults(func=cmd_hook)
 
     a = sub.add_parser("ask", help="ask one agent a single question")
     a.add_argument("--to", required=True, choices=list(AGENTS))

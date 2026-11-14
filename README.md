@@ -38,6 +38,22 @@ opinions invents agreement that is not there.
 * `review`: BLOCK if any agent proved a blocker, or if a majority voted block. An unproven blocker
   does not block — otherwise any agent could veto by asserting things it never checked.
 
+## Always on
+
+Two hooks in `~/.claude/settings.json` make the review automatic in every project:
+
+| event | command | what it does |
+|---|---|---|
+| `Stop` | `py -3 -m council hook --event stop` | if the working tree changed, starts a **detached background** review. Never blocks a turn, never fails one. Skips a diff that was already reviewed and enforces a 300 s cooldown. |
+| `UserPromptSubmit` | `py -3 -m council hook --event prompt` | prints the last background verdict once, then clears it. |
+
+Plus a hard gate where it matters: `council init --hook` installs a pre-commit that blocks a commit
+on a proved blocker. It fails **open** if the review cannot run (exit 1) — a flaky API must not stop
+all commits; set `COUNCIL_FAIL_CLOSED=1` to invert that.
+
+Cost control is built in: a diff is reviewed once (hash match) and at most one review starts per
+5 minutes per project. Raise the cooldown with `council hook --event stop --cooldown 900`.
+
 ## Postures
 
 | posture | read | run commands | edit files |

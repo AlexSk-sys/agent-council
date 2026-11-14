@@ -35,6 +35,9 @@ council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
    fallback; both were needed on real output.
 6. **Only one agent may write.** `work` promotes one executor to `autonomous`; reviewers stay
    `shell` so they cannot edit what they review.
+7. **Hooks must never break a turn.** `council hook` catches everything and returns 0. The Stop
+   hook spawns a detached child; it does not wait for the review. Dedup is by diff hash, plus a
+   300 s cooldown, because the hook fires after *every* assistant turn.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

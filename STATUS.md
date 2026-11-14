@@ -1,8 +1,9 @@
 # STATUS — agent-council
 
 ## Now
-Working CLI: `review`, `work`, `task`, `ask`, `status`, `doctor`, `init`. 44 unit tests green.
-Both E2E paths verified on a seeded bug: detection (3/3) and repair (executor fixed it, tests pass).
+Always-on mode: a Stop hook starts a background review after any turn that changed files, a
+UserPromptSubmit hook surfaces the verdict on the next turn, and a pre-commit gate blocks proved
+blockers. 52 unit tests green. Detection and repair both verified on a seeded bug.
 
 ## Next (max 3)
 1. Use it on a real repo: `council review --diff HEAD` on the next non-trivial change in the user's active project.
@@ -32,3 +33,7 @@ Both E2E paths verified on a seeded bug: detection (3/3) and repair (executor fi
   3/3 answered, 109 s, Claude $0.109.
 - **2026-11-14** — `council init --hook` writes config + pre-commit gate; `council status` reads
   the latest run and prints its synthesis.
+- **2026-11-14** — hooks wired into `~/.claude/settings.json` (Stop + UserPromptSubmit), all four
+  previous hooks kept; `json.load` reports OK and lists all five commands. Pipe-test outside a git
+  repo: both return exit 0 with no output. `py -3 -m unittest discover -s tests` → 52 tests OK.
+  Pre-commit regenerated with `--if-changed` and fail-open on exit 1.
