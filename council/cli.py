@@ -101,6 +101,7 @@ def cmd_task(args: argparse.Namespace) -> int:
     finally:
         if token:
             release_lock(project, token)
+        drain_queue(project)
 
 
 def _task(project: Path, args: argparse.Namespace) -> int:
@@ -252,6 +253,7 @@ def cmd_work(args: argparse.Namespace) -> int:
     finally:
         if token:
             release_lock(project, token)
+        drain_queue(project)
 
 
 def _work(project: Path, args: argparse.Namespace) -> int:

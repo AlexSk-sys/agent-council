@@ -495,18 +495,35 @@ def _print_pending(project: Path) -> None:
     pending = Path(project) / PENDING_REL
     if not pending.exists():
         return
+    # Consume atomically: rename first, print after. A writer appending between
+    # the read and the delete would otherwise lose a verdict unread.
+    consumed = pending.with_name(
+        f"{pending.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.read"
+    )
+    replaced = False
     try:
-        text = pending.read_text(encoding="utf-8")
+        os.replace(pending, consumed)
+        replaced = True
+    except OSError:
+        consumed = pending  # a writer holds it open: print in place, keep the file
+    try:
+        text = consumed.read_text(encoding="utf-8")
     except OSError:
         return
-    if text.strip():
-        print(text.strip())
-    # Delete only after a successful print: a broken stdout must not destroy
-    # a verdict that no one has read yet.
     try:
-        pending.unlink()
-    except OSError:
-        pass
+        if text.strip():
+            print(text.strip())
+    except Exception:
+        # A broken stdout must not destroy a verdict no one has read: put the
+        # file back under its original name and let the next turn retry.
+        if replaced:
+            try:
+                os.replace(consumed, pending)
+            except OSError:
+                pass
+        raise
+    if replaced:
+        _unlink_quiet(consumed)
 
 
 def _unlink_quiet(path: Path) -> None:
@@ -652,7 +669,10 @@ def write_pending(project: Path, decision: str, findings, run_dir: Path,
     ensure_council_gitignore(project)
     # Append, never overwrite: a consult and a Stop review can both finish
     # between two user turns, and one verdict must not destroy the other.
-    had_text = pending.exists() and pending.stat().st_size > 0
+    try:
+        had_text = pending.exists() and pending.stat().st_size > 0
+    except OSError:
+        had_text = False
     with pending.open("a", encoding="utf-8") as fh:
         if had_text:
             fh.write("\n")

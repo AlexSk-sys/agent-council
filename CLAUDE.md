@@ -70,9 +70,12 @@ new user message is queued (latest wins) and the running child drains the queue 
     (verified with `Start-Process -RedirectStandardOutput`).
 11. **The consult hook is prompt-time, not diff-time.** It fires on every user message; the
     message is written to `.council/inbox/` and passed as a file path (newline truncation, see
-    quirk 1). It is skipped while `.council/running.json` is fresh (TTL 1800 s) and for 30 s after
-    the previous spawn. The Stop review checks the same lock, so six models never run on one tree.
-    The child releases the lock only with the token it was given - never another run's.
+    quirk 1). If a run holds `.council/running.json` (O_EXCL create, TTL 900 s, pid checked for
+    liveness), the message is queued (`consult_queued`, latest wins) and the running child drains
+    it on exit. The 30 s cooldown applies only when no message is queued. The Stop review checks
+    the same lock, so six models never run on one tree, and a review that arrives during a run is
+    deferred (`review_due`). The child releases the lock only with the token it was given - never
+    another run's.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.
