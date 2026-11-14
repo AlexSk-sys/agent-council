@@ -124,6 +124,43 @@ QUESTION:
 {question}
 """
 
+CONSULT = HEADER + """
+You are joining an active coding session. The user has just sent the message
+below and the main agent is about to act on it. Your job is to catch what that
+agent is about to get wrong, before it does.
+
+USER'S LATEST MESSAGE:
+{message}
+
+RECENT SESSION (transcript tail, oldest first):
+{transcript}
+
+REPOSITORY STATE:
+{git_state}
+
+Uncommitted change under discussion:
+{diff}
+
+Check specifically:
+1. What does the user actually want, and which constraint is easy to miss?
+2. What would break in the files involved? Read them before claiming anything.
+3. Is the session about to assert something it has not verified?
+4. If there is an uncommitted diff, does it contain a defect?
+
+Reply with ONLY lines in this format, nothing else - no headings, no prose, no
+code fences:
+
+VERDICT: <APPROVE|BLOCK>
+FINDING: <blocker|major|minor> | <file>:<line> | <one-line issue> | <evidence>
+
+Rules:
+- One FINDING line per defect, most severe first, at most 6.
+- BLOCK only if a blocker exists, otherwise APPROVE.
+- Evidence must be a file:line you read or code you quoted. A finding with no
+  evidence is invalid - leave it out.
+- If you have nothing to add, reply with the single line VERDICT: APPROVE.
+"""
+
 EXECUTE = HEADER + """
 You are the EXECUTOR. Three agents planned the task and the council chose the plan
 below. Your job is to implement it in the repository now. You may read files, run
@@ -240,6 +277,19 @@ def review_diff_prompt(agent: str, project: str, diff: str, allow_shell: bool = 
 def ask_prompt(agent: str, project: str, question: str, allow_shell: bool = False) -> str:
     return ASK.format(
         question=question, **_header(agent, project, allow_shell)
+    )
+
+
+def consult_prompt(agent: str, project: str, message: str, transcript: str,
+                   git_state: str, diff: str, allow_shell: bool = False,
+                   max_chars: int = 60000) -> str:
+    trimmed = diff if len(diff) <= max_chars else diff[:max_chars] + "\n... [diff truncated]"
+    return CONSULT.format(
+        message=message.strip()[:8000],
+        transcript=transcript.strip() or "(no recent turns)",
+        git_state=git_state or "(unknown)",
+        diff=trimmed.strip() or "(no uncommitted change)",
+        **_header(agent, project, allow_shell),
     )
 
 

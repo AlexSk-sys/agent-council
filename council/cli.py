@@ -6,16 +6,28 @@ import argparse
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from . import prompts
 from .adapters import AGENTS, POSTURES, AgentConfig, run_agent
 from .gitutil import collect_diff as _collect_diff
-from .hooks import fingerprint, load_state, save_state, scope_key, write_pending
+from .hooks import (
+    acquire_lock,
+    drain_queue,
+    fingerprint,
+    load_state,
+    release_lock,
+    save_state,
+    scope_key,
+    transcript_digest,
+    write_pending,
+)
 from .protocol import (
     SEVERITY_ORDER,
     CouncilOutcome,
     run_diff_review,
+    run_session_consult,
     run_task_council,
     run_work_loop,
 )
@@ -64,8 +76,34 @@ def _print_outcome(out: CouncilOutcome) -> None:
 # --------------------------------------------------------------------------
 
 
+def _acquire_cli_lock(project: Path, args: argparse.Namespace, kind: str) -> str | None:
+    """A manual run takes the project lock; a hook child already holds one.
+
+    Returns the token this call owns, None when `--lock-token` says a parent
+    hook already holds it, and "" when another run is active.
+    """
+    if getattr(args, "lock_token", None):
+        return None
+    token = uuid.uuid4().hex
+    if not acquire_lock(project, kind, token):
+        print(f"council: another council run is active in {project}", file=sys.stderr)
+        return ""
+    return token
+
+
 def cmd_task(args: argparse.Namespace) -> int:
     project = Path(args.project or ".").resolve()
+    token = _acquire_cli_lock(project, args, "task")
+    if token == "":
+        return 1
+    try:
+        return _task(project, args)
+    finally:
+        if token:
+            release_lock(project, token)
+
+
+def _task(project: Path, args: argparse.Namespace) -> int:
     context = None
     if args.context:
         context = Path(args.context).read_text(encoding="utf-8")
@@ -86,6 +124,21 @@ def cmd_task(args: argparse.Namespace) -> int:
 
 def cmd_review(args: argparse.Namespace) -> int:
     project = Path(args.project or ".").resolve()
+    token = _acquire_cli_lock(project, args, "review")
+    if token == "":
+        return 1
+    try:
+        return _review(project, args)
+    finally:
+        if token:
+            release_lock(project, token)
+        elif getattr(args, "lock_token", None):
+            release_lock(project, args.lock_token)
+        if getattr(args, "background", False):
+            drain_queue(project)
+
+
+def _review(project: Path, args: argparse.Namespace) -> int:
     diff, stat = _collect_diff(project, args.staged, args.diff, args.path)
     if not diff.strip():
         print("council: nothing to review (empty diff)", file=sys.stderr)
@@ -125,9 +178,83 @@ def cmd_review(args: argparse.Namespace) -> int:
     return out.exit_code
 
 
+def cmd_consult(args: argparse.Namespace) -> int:
+    """Background child of the UserPromptSubmit hook: three agents join a turn."""
+    project = Path(args.project or ".").resolve()
+    token = _acquire_cli_lock(project, args, "consult")
+    if token == "":
+        return 1
+    try:
+        return _consult(project, args)
+    finally:
+        if token:
+            release_lock(project, token)
+        elif args.lock_token:
+            release_lock(project, args.lock_token)
+        if args.background:
+            drain_queue(project)
+
+
+def _consult(project: Path, args: argparse.Namespace) -> int:
+    prompt_file = Path(args.prompt_file)
+    try:
+        message = prompt_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"council consult: cannot read prompt file: {exc}", file=sys.stderr)
+        return 1
+    try:
+        prompt_file.unlink()  # the text now lives in the run's session.md
+    except OSError:
+        pass
+    transcript = transcript_digest(Path(args.transcript)) if args.transcript else ""
+    from .gitutil import git_summary
+
+    git_state = git_summary(project)
+    diff, stat = _collect_diff(project)
+    if len(diff) > args.max_chars:
+        diff = diff[: args.max_chars] + "\n... [diff truncated by council]"
+    agents = _split_agents(args.agents)
+    overrides = _load_overrides(project)
+    print(f"council consult: {len(agents)} agents, prompt {len(message)} chars, "
+          f"transcript {len(transcript)} chars, diff {len(diff)} chars", file=sys.stderr)
+    out = run_session_consult(project, message, transcript, diff, stat, git_state,
+                              agents, overrides, on_done=_progress,
+                              max_chars=args.max_chars)
+
+    if args.background:
+        write_pending(project, out.decision, out.findings, out.run_dir, mode="consult")
+    state = load_state(project)
+    state["consult"] = {"fingerprint": fingerprint(message), "decision": out.decision,
+                        "run_dir": str(out.run_dir), "ts": time.time()}
+    # A consult is advisory: it must never stand in for the diff gate's cache.
+    # The Stop review still runs on this diff; `review --if-changed` must keep
+    # reporting the last real review, not "approve" for a message like "thanks".
+    save_state(project, state)
+
+    _print_outcome(out)
+    if args.json:
+        print(json.dumps({
+            "decision": out.decision,
+            "findings": [f.to_dict() for f in out.findings],
+            "run_dir": str(out.run_dir),
+        }, indent=2))
+    return out.exit_code
+
+
 def cmd_work(args: argparse.Namespace) -> int:
     """Plan, execute, verify, fix: the full loop with one writer and two checkers."""
     project = Path(args.project or ".").resolve()
+    token = _acquire_cli_lock(project, args, "work")
+    if token == "":
+        return 1
+    try:
+        return _work(project, args)
+    finally:
+        if token:
+            release_lock(project, token)
+
+
+def _work(project: Path, args: argparse.Namespace) -> int:
     context = None
     if args.context:
         context = Path(args.context).read_text(encoding="utf-8")
@@ -155,7 +282,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
     try:
         if args.event == "stop":
             return hooks.stop_hook(project, args.cooldown)
-        return hooks.prompt_hook(project)
+        return hooks.prompt_hook(project, args.prompt_cooldown)
     except Exception as exc:  # a hook must never break the user's turn
         print(f"council hook: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 0
@@ -382,12 +509,29 @@ def build_parser() -> argparse.ArgumentParser:
                    help="reuse the last verdict when the diff is byte-identical")
     r.add_argument("--background", action="store_true",
                    help="write .council/pending.md for the next turn (hook mode)")
+    r.add_argument("--lock-token", help="release this run's council lock on exit")
     r.set_defaults(func=cmd_review)
+
+    c = sub.add_parser(
+        "consult",
+        help="three agents join a live session on the user's latest message",
+    )
+    c.add_argument("--prompt-file", required=True, help="file with the user's message")
+    c.add_argument("--transcript", help="session transcript for the context digest")
+    c.add_argument("--agents", help="comma-separated subset: claude,dsh,opencode")
+    c.add_argument("--max-chars", type=int, default=60000)
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--background", action="store_true",
+                   help="write .council/pending.md for the next turn (hook mode)")
+    c.add_argument("--lock-token", help="release this run's council lock on exit")
+    c.set_defaults(func=cmd_consult)
 
     h = sub.add_parser("hook", help="entry point for Claude Code hooks")
     h.add_argument("--event", choices=["stop", "prompt"], required=True)
     h.add_argument("--cooldown", type=int, default=300,
                    help="minimum seconds between background reviews (default 300)")
+    h.add_argument("--prompt-cooldown", type=int, default=30,
+                   help="minimum seconds between session consults (default 30)")
     h.set_defaults(func=cmd_hook)
 
     w = sub.add_parser("watch", help="record whether the hook chain fires in a project")

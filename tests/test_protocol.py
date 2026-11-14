@@ -10,20 +10,25 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from council.adapters import AgentConfig, _materialize_prompt
+from council import prompts
+from council.adapters import AgentConfig, AgentResult, _materialize_prompt
 from council.gitutil import git_summary, is_noise
 from council.cli import _collect_diff, main
 from council.hooks import (
-    _spawn_review, fingerprint, load_state, prompt_hook, resolve_project,
-    save_state, stop_hook,
+    MAX_RUN_S, _print_pending, _spawn_consult, _spawn_review, acquire_lock,
+    council_busy, drain_queue, fingerprint, load_state, prompt_hook,
+    release_lock, resolve_project, save_state, stop_hook, transcript_digest,
+    write_pending,
 )
 from council.protocol import (
+    CouncilOutcome,
     Finding,
     PeerReview,
     extract_json_objects,
@@ -31,6 +36,7 @@ from council.protocol import (
     merge_proposals,
     parse_diff_review,
     parse_peer_reviews,
+    run_session_consult,
 )
 from council.store import RunStore, latest_run
 from council.watch import snapshot, stop_watch, watch
@@ -556,6 +562,399 @@ class TestDiffCollection(unittest.TestCase):
             diff, _ = _collect_diff(root, staged=False, ref=None, path=None)
             self.assertIn("-one", diff)
             self.assertIn("+two", diff)
+
+
+class TestTranscriptDigest(unittest.TestCase):
+    def test_extracts_roles_text_and_tool_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.jsonl"
+            rows = [
+                {"message": {"role": "user", "content": [
+                    {"type": "text", "text": "fix the parser"}]}},
+                {"message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "reading it"},
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "a.py"}},
+                ]}},
+            ]
+            path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            digest = transcript_digest(path)
+            self.assertIn("[user] fix the parser", digest)
+            self.assertIn("[assistant] reading it [Edit a.py]", digest)
+
+    def test_tool_results_are_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.jsonl"
+            row = {"message": {"role": "user", "content": [
+                {"type": "tool_result", "content": "x" * 5000}]}}
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            self.assertEqual(transcript_digest(path), "")
+
+    def test_caps_length_keeping_the_newest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.jsonl"
+            rows = [{"message": {"role": "user", "content": [
+                {"type": "text", "text": f"turn {i} " + "x" * 100}]}} for i in range(60)]
+            path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            digest = transcript_digest(path, max_entries=10, max_chars=600)
+            self.assertLessEqual(len(digest), 603)
+            self.assertIn("turn 59", digest)
+
+
+class TestConsultPrompt(unittest.TestCase):
+    def test_contains_message_context_and_contract(self):
+        text = prompts.consult_prompt(
+            "dsh", "C:/p", "fix the parser", "digest line",
+            "git repository, clean tree", "+++ b/a.py", False,
+        )
+        self.assertIn("fix the parser", text)
+        self.assertIn("digest line", text)
+        self.assertIn("VERDICT:", text)
+        self.assertIn("FINDING:", text)
+
+    def test_braces_in_the_user_message_are_literal(self):
+        text = prompts.consult_prompt("dsh", "C:/p", "use {x} and {y}", "", "", "", False)
+        self.assertIn("{x} and {y}", text)
+
+    def test_empty_diff_is_rendered_as_empty(self):
+        text = prompts.consult_prompt("dsh", "C:/p", "hi", "", "", "", False)
+        self.assertIn("(no uncommitted change)", text)
+
+
+class TestSessionConsult(unittest.TestCase):
+    def _fake(self, texts: dict[str, str]):
+        def fake(agent, *_args):
+            _ = _args
+            return AgentResult(agent=agent, ok=True,
+                               text=texts.get(agent, "VERDICT: APPROVE"))
+        return fake
+
+    def test_all_three_answer_approve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=self._fake({})):
+                out = run_session_consult(Path(tmp), "hello", "digest", "", "", "clean")
+            self.assertEqual(out.mode, "consult")
+            self.assertEqual(out.decision, "approve")
+            self.assertEqual(len(out.results), 3)
+            self.assertTrue((out.run_dir / "synthesis.md").exists())
+            self.assertTrue((out.run_dir / "session.md").exists())
+            self.assertTrue((out.run_dir / "context.md").exists())
+
+    def test_evidenced_blocker_blocks(self):
+        texts = {"dsh": "VERDICT: BLOCK\n"
+                        "FINDING: blocker | a.py:1 | boom | read a.py:1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.decision, "block")
+            self.assertEqual(out.findings[0].source, "dsh")
+
+    def test_unevidenced_blocker_does_not_block(self):
+        texts = {"dsh": "VERDICT: BLOCK\nFINDING: blocker | | boom |"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.decision, "approve")
+
+    def test_fewer_than_two_answers_is_error(self):
+        def fake(agent, *_args):
+            _ = _args
+            if agent == "claude":
+                return AgentResult(agent=agent, ok=True, text="VERDICT: APPROVE")
+            return AgentResult(agent=agent, ok=False, error="down")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=fake):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.decision, "error")
+
+
+class TestCouncilLock(unittest.TestCase):
+    def test_busy_until_the_owner_releases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "consult", "token-a")
+            self.assertTrue(council_busy(root))
+            release_lock(root, "wrong-token")
+            self.assertTrue(council_busy(root))
+            release_lock(root, "token-a")
+            self.assertFalse(council_busy(root))
+
+    def test_expired_lock_is_ignored_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "consult", "old")
+            path = root / ".council" / "running.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["started_at"] = time.time() - MAX_RUN_S - 10
+            path.write_text(json.dumps(data), encoding="utf-8")
+            self.assertFalse(council_busy(root))
+            self.assertFalse(path.exists())
+
+    def test_second_acquire_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertTrue(acquire_lock(root, "consult", "first"))
+            self.assertFalse(acquire_lock(root, "review", "second"))
+            lock = json.loads((root / ".council" / "running.json").read_text(encoding="utf-8"))
+            self.assertEqual(lock["token"], "first")
+
+    def test_runtime_files_are_gitignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "consult", "tok")
+            gitignore = root / ".council" / ".gitignore"
+            self.assertTrue(gitignore.exists())
+            text = gitignore.read_text(encoding="utf-8")
+            self.assertIn("*", text)
+            self.assertIn("!config.json", text)
+
+
+class TestPromptConsultHook(unittest.TestCase):
+    """The user writes - all three agents join the turn."""
+
+    def _payload(self, root: Path, message: str = "please fix it") -> str:
+        return json.dumps({"prompt": message,
+                           "transcript_path": str(root / "t.jsonl")})
+
+    def test_spawns_consult_on_user_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch("sys.stdin", io.StringIO(self._payload(root))), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult", return_value=0) as spawn:
+                prompt_hook(root)
+            spawn.assert_called_once()
+            prompt_file = spawn.call_args[0][1]
+            self.assertEqual(prompt_file.read_text(encoding="utf-8"), "please fix it")
+            self.assertTrue(council_busy(root))
+            lock = json.loads((root / ".council" / "running.json").read_text(encoding="utf-8"))
+            self.assertEqual(lock["kind"], "consult")
+
+    def test_skips_while_another_council_run_is_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "review", "busy")
+            with mock.patch("sys.stdin", io.StringIO(self._payload(root))), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult") as spawn:
+                prompt_hook(root)
+            spawn.assert_not_called()
+
+    def test_busy_hook_queues_the_message_instead_of_dropping_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "review", "busy")
+            with mock.patch("sys.stdin", io.StringIO(self._payload(root))), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult") as spawn:
+                prompt_hook(root)
+            spawn.assert_not_called()
+            queued = load_state(root).get("consult_queued") or {}
+            queued_file = Path(str(queued.get("prompt_file") or ""))
+            self.assertTrue(queued_file.is_file())
+            self.assertEqual(queued_file.read_text(encoding="utf-8"), "please fix it")
+
+    def test_latest_queued_message_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "review", "busy")
+            for text in ("first message", "second message"):
+                with mock.patch("sys.stdin", io.StringIO(self._payload(root, text))), \
+                     mock.patch("sys.stdout", io.StringIO()), \
+                     mock.patch("council.hooks._spawn_consult"):
+                    prompt_hook(root)
+            inbox = root / ".council" / "inbox"
+            files = list(inbox.glob("prompt-*.md"))
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].read_text(encoding="utf-8"), "second message")
+
+    def test_drain_starts_the_queued_consult(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "review", "busy")
+            with mock.patch("sys.stdin", io.StringIO(self._payload(root))), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult"):
+                prompt_hook(root)
+            release_lock(root, "busy")
+            with mock.patch("council.hooks._spawn_consult", return_value=0) as spawn:
+                self.assertTrue(drain_queue(root))
+            spawn.assert_called_once()
+            self.assertNotIn("consult_queued", load_state(root))
+            self.assertTrue(council_busy(root))
+
+    def test_skips_inside_the_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_state(root, {"consult_last_spawn": time.time()})
+            with mock.patch("sys.stdin", io.StringIO(self._payload(root))), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult") as spawn:
+                prompt_hook(root)
+            spawn.assert_not_called()
+
+    def test_stale_lock_does_not_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "consult", "old")
+            path = root / ".council" / "running.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["started_at"] = time.time() - MAX_RUN_S - 10
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with mock.patch("sys.stdin", io.StringIO(self._payload(root))), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult") as spawn:
+                prompt_hook(root)
+            spawn.assert_called_once()
+
+    def test_without_a_prompt_it_only_surfaces_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch("sys.stdin", io.StringIO("{}")), \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("council.hooks._spawn_consult") as spawn:
+                prompt_hook(root)
+            spawn.assert_not_called()
+
+    def test_spawn_orders_project_before_subcommand(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("council.hooks.subprocess.Popen") as popen:
+            prompt_file = Path(tmp) / "msg.md"
+            prompt_file.write_text("hi", encoding="utf-8")
+            _spawn_consult(Path(tmp), prompt_file, "t.jsonl", "tok")
+        args = popen.call_args[0][0]
+        self.assertLess(args.index("--project"), args.index("consult"))
+        self.assertIn("--prompt-file", args)
+        self.assertIn("--transcript", args)
+        self.assertIn("--lock-token", args)
+
+    def test_stop_hook_defers_review_while_consult_runs(self):
+        """The blocker the council found: a busy lock must defer, not drop."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            acquire_lock(root, "consult", "busy")
+            with mock.patch("sys.stdin", io.StringIO("{}")), \
+                 mock.patch("council.hooks._spawn_review") as spawn:
+                stop_hook(root)
+            spawn.assert_not_called()
+            due = load_state(root).get("review_due")
+            self.assertTrue(due)
+
+            release_lock(root, "busy")
+            with mock.patch("sys.stdin", io.StringIO("{}")), \
+                 mock.patch("council.hooks._spawn_review") as spawn2:
+                stop_hook(root)
+            spawn2.assert_called_once()
+
+    def test_dead_pid_clears_the_lock_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acquire_lock(root, "consult", "tok", pid=2_147_483_647)
+            self.assertFalse(council_busy(root))
+            self.assertFalse((root / ".council" / "running.json").exists())
+
+    def test_pending_keeps_both_verdicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_pending(root, "block", [], root / "r1", mode="review")
+            write_pending(root, "approve", [], root / "r2", mode="consult")
+            pending = root / ".council" / "pending.md"
+            text = pending.read_text(encoding="utf-8")
+            self.assertIn("[background council review] BLOCK", text)
+            self.assertIn("[background council consult] APPROVE", text)
+
+            buffer = io.StringIO()
+            with mock.patch("sys.stdout", buffer):
+                _print_pending(root)
+            self.assertIn("BLOCK", buffer.getvalue())
+            self.assertIn("APPROVE", buffer.getvalue())
+            self.assertFalse(pending.exists())
+
+    def test_pending_survives_a_failed_print(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_pending(root, "block", [], root / "r1")
+            with mock.patch("builtins.print", side_effect=AttributeError("no stdout")):
+                with self.assertRaises(AttributeError):
+                    _print_pending(root)
+            self.assertTrue((root / ".council" / "pending.md").exists())
+
+    def test_stop_hook_skips_while_consult_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            acquire_lock(root, "consult", "busy")
+            with mock.patch("sys.stdin", io.StringIO("{}")), \
+                 mock.patch("council.hooks._spawn_review") as spawn:
+                stop_hook(root)
+            spawn.assert_not_called()
+
+
+class TestConsultCommand(unittest.TestCase):
+    def test_background_writes_pending_and_releases_its_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_file = root / "msg.md"
+            prompt_file.write_text("hello", encoding="utf-8")
+            outcome = CouncilOutcome("consult", "approve", [], [], [],
+                                     root / "run", "", "APPROVE: 0 blocker(s)")
+            acquire_lock(root, "consult", "tok")
+            with mock.patch("council.cli.run_session_consult", return_value=outcome):
+                code = main(["--project", str(root), "consult",
+                             "--prompt-file", str(prompt_file),
+                             "--background", "--lock-token", "tok"])
+            self.assertEqual(code, 0)
+            self.assertTrue((root / ".council" / "pending.md").exists())
+            self.assertFalse((root / ".council" / "running.json").exists())
+            state = load_state(root)
+            self.assertEqual(state["consult"]["decision"], "approve")
+
+    def test_consult_does_not_overwrite_the_diff_gate_cache(self):
+        """A consult verdict is about the message, never about the diff gate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            save_state(root, {"worktree": {"fingerprint": "real-review", "decision": "block"}})
+            prompt_file = root / "msg.md"
+            prompt_file.write_text("thanks", encoding="utf-8")
+            outcome = CouncilOutcome("consult", "approve", [], [], [],
+                                     root / "run", "", "APPROVE")
+            with mock.patch("council.cli.run_session_consult", return_value=outcome):
+                main(["--project", str(root), "consult",
+                      "--prompt-file", str(prompt_file), "--background"])
+            worktree = load_state(root).get("worktree") or {}
+            self.assertEqual(worktree.get("fingerprint"), "real-review")
+            self.assertEqual(worktree.get("decision"), "block")
+
+    def test_failed_consult_leaves_the_diff_for_the_stop_hook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            prompt_file = root / "msg.md"
+            prompt_file.write_text("hello", encoding="utf-8")
+            outcome = CouncilOutcome("consult", "error", [], [], [],
+                                     root / "run", "", "ERROR")
+            with mock.patch("council.cli.run_session_consult", return_value=outcome):
+                main(["--project", str(root), "consult",
+                      "--prompt-file", str(prompt_file), "--background"])
+            self.assertNotIn("worktree", load_state(root))
+
+    def test_consult_forwards_max_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_file = root / "msg.md"
+            prompt_file.write_text("hello", encoding="utf-8")
+            outcome = CouncilOutcome("consult", "approve", [], [], [],
+                                     root / "run", "", "APPROVE")
+            with mock.patch("council.cli.run_session_consult",
+                            return_value=outcome) as run:
+                main(["--project", str(root), "consult",
+                      "--prompt-file", str(prompt_file), "--max-chars", "1234"])
+            self.assertEqual(run.call_args.kwargs["max_chars"], 1234)
 
 
 if __name__ == "__main__":

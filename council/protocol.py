@@ -529,6 +529,45 @@ def render_diff_synthesis(
     return "\n".join(lines)
 
 
+def render_consult_synthesis(
+    decision: str, verdicts: dict[str, str], findings: list[Finding],
+    user_message: str, diff_stat: str,
+) -> str:
+    first = next((ln for ln in user_message.strip().splitlines() if ln.strip()), "")
+    lines = ["# Council session consult", "", f"**User message:** {first[:300]}", ""]
+    if diff_stat:
+        lines += [f"**Uncommitted:** {diff_stat}", ""]
+    lines += ["## Verdict", ""]
+    if decision == "block":
+        lines.append("**BLOCK**")
+    elif decision == "error":
+        lines.append("**ERROR** - not enough agents answered")
+    else:
+        lines.append("**APPROVE**")
+    lines += ["", "| agent | verdict |", "|---|---|"]
+    for name in sorted(verdicts):
+        lines.append(f"| {name} | {verdicts[name] or 'unparsed'} |")
+
+    ranked = sorted(
+        [f for f in findings if f.has_evidence],
+        key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
+    )
+    lines += ["", "## Findings", ""]
+    if not ranked:
+        lines.append("None with evidence.")
+    for f in ranked:
+        loc = f" `{f.file}:{f.line}`" if f.file else ""
+        lines.append(f"- **[{f.severity}]**{loc} {f.issue}")
+        lines.append(f"  - evidence: {f.evidence}  _(from {f.source})_")
+
+    undated = [f for f in findings if not f.has_evidence]
+    if undated:
+        lines += ["", "## Discarded (no evidence supplied)", ""]
+        for f in undated:
+            lines.append(f"- [{f.severity}] {f.issue} ({f.source})")
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -901,6 +940,83 @@ def run_diff_review(
     })
     blockers = sum(1 for f in findings if f.severity == "blocker" and f.has_evidence)
     return CouncilOutcome("review", decision, findings, [], results, store.dir, synthesis,
+                          _short(decision, f"{blockers} blocker(s), {len(findings)} finding(s)"))
+
+
+def run_session_consult(
+    project: Path,
+    user_message: str,
+    transcript: str = "",
+    diff: str = "",
+    diff_stat: str = "",
+    git_state: str = "",
+    agents: list[str] | None = None,
+    overrides: dict[str, dict] | None = None,
+    on_done=None,
+    posture: str = "read_only",
+    max_chars: int = 60000,
+) -> CouncilOutcome:
+    """All three agents join a live session the moment the user writes.
+
+    Not a diff gate: the message, the transcript tail and the uncommitted
+    change are all context. The evidence rule is unchanged - a finding without
+    proof is discarded, so a verdict in pending.md is worth reading.
+    """
+    project = Path(project).resolve()
+    agents = agents or list(AGENTS)
+    cfgs = _configs(agents, overrides, posture)
+    store = RunStore.for_task(project, f"consult-{user_message.strip()}")
+    store.write("session.md", user_message + "\n")
+    store.write("context.md", transcript or "(no transcript)\n")
+    if diff:
+        store.write("diff.patch", diff)
+    store.write_meta({
+        "mode": "consult", "agents": agents, "posture": posture,
+        "prompt_chars": len(user_message), "diff_stat": diff_stat,
+    })
+    _attach_prompt_dir(cfgs, store)
+    store.log({"event": "start", "mode": "consult", "agents": agents,
+               "prompt_chars": len(user_message), "diff_chars": len(diff)})
+
+    results = _parallel(
+        {a: (prompts.consult_prompt(
+                a, str(project), user_message, transcript, git_state, diff,
+                cfgs[a].posture != "read_only", max_chars),
+             str(project)) for a in agents},
+        cfgs,
+        on_done=on_done,
+    )
+
+    verdicts: dict[str, str] = {}
+    findings: list[Finding] = []
+    for res in results:
+        store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
+        store.log({"event": "consult", **res.to_dict()})
+        if not res.ok:
+            verdicts[res.agent] = ""
+            continue
+        verdict, parsed = parse_diff_review(res.agent, res.text)
+        verdicts[res.agent] = verdict
+        findings.extend(parsed)
+
+    answered = [v for v in verdicts.values() if v]
+    if len(answered) < MIN_AGENTS:
+        synthesis = render_consult_synthesis("error", verdicts, findings,
+                                             user_message, diff_stat)
+        store.write("synthesis.md", synthesis)
+        return CouncilOutcome("consult", "error", findings, [], results, store.dir, synthesis,
+                              _short("error", "not enough agents answered"))
+
+    decision = merge_diff_review(verdicts, findings)
+    synthesis = render_consult_synthesis(decision, verdicts, findings,
+                                         user_message, diff_stat)
+    store.write("synthesis.md", synthesis)
+    store.log({
+        "event": "synthesis", "decision": decision, "verdicts": verdicts,
+        "findings": [f.to_dict() for f in findings],
+    })
+    blockers = sum(1 for f in findings if f.severity == "blocker" and f.has_evidence)
+    return CouncilOutcome("consult", decision, findings, [], results, store.dir, synthesis,
                           _short(decision, f"{blockers} blocker(s), {len(findings)} finding(s)"))
 
 

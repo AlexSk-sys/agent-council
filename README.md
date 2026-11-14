@@ -16,6 +16,7 @@ finding without evidence is discarded with its author named.
 | `council work "<task>"` | three plans → cross-review → one executor writes → the other two verify → executor fixes → re-verify | 0 done, 2 findings remain, 1 error |
 | `council task "<task>"` | plan only: three proposals, cross-reviewed, deterministic vote | 0, 2, 1 |
 | `council ask --to dsh "<question>"` | one peer question | 0/1 |
+| `council consult --prompt-file F` | three agents join a live session: the user's message, the transcript tail and the uncommitted diff | 0 approve, 2 block |
 | `council status` | last run in this project | |
 | `council doctor` | prove all three harnesses answer headless | |
 | `council init [--hook]` | `.council/` config, gitignore, optional pre-commit gate | |
@@ -40,12 +41,19 @@ opinions invents agreement that is not there.
 
 ## Always on
 
-Two hooks in `~/.claude/settings.json` make the review automatic in every project:
+Two hooks in `~/.claude/settings.json` make the council automatic in every project:
 
 | event | command | what it does |
 |---|---|---|
-| `Stop` | `pythonw.exe` + `args: [-m, council, hook, --event, stop]` | if the working tree changed, starts a **detached background** review. Never blocks a turn, never fails one. Skips a diff that was already reviewed and enforces a 300 s cooldown. |
-| `UserPromptSubmit` | `pythonw.exe` + `args: [-m, council, hook, --event, prompt]` | prints the last background verdict once, then clears it. |
+| `UserPromptSubmit` | `pythonw.exe` + `args: [-m, council, hook, --event, prompt]` | on every user message: prints the previous verdict once, then starts a **detached three-agent `consult`** (message + transcript tail + uncommitted diff). If a run already holds the lock, the message is queued (latest wins) and the running child starts it on exit. |
+| `Stop` | `pythonw.exe` + `args: [-m, council, hook, --event, stop]` | if the working tree changed, starts a **detached background** review. Skips a diff that was already reviewed and enforces a 300 s cooldown. |
+
+A shared lock (`.council/running.json`, TTL 900 s, dead-pid recovery, O_EXCL create) allows one
+council run per project at a time, so a consult and a diff review never put six models on the same
+tree. A Stop review that arrives while a consult is running is **deferred, not dropped**
+(`review_due`), and the next free Stop runs it. A consult is advisory and never writes the diff
+gate's cache; only a real review does. The verdict lands in `.council/pending.md` and is printed
+into the next user turn; nothing waits for it.
 
 Both hooks use the exec form (`command` + `args`), so no shell and no console window is created;
 `pythonw.exe` still writes to a redirected stdout normally (verified). A console-subsystem `python`

@@ -6,18 +6,36 @@ they review, and in `work` mode fix, each other's output. Single package, stdlib
 
 ## Commands
 ```powershell
-py -3 -m unittest discover -s tests -v      # verify (42 tests, no network)
+py -3 -m unittest discover -s tests -v      # verify (95 tests, no network)
 py -3 -m pip install -e .                   # installs the `council` entry point
 council doctor                              # prove all 3 harnesses answer headless
 council review --path sandbox               # cross-review a diff
 council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
+council --project <p> consult --prompt-file <f>  # three agents join a user message
 ```
+
+## Automatic mode (already wired)
+`~/.claude/settings.json` runs two hooks:
+- `UserPromptSubmit` → `council hook --event prompt` → detached `council consult`
+  on every user message: the message, transcript tail and uncommitted diff go
+  to all three agents. Verdict appears in `.council/pending.md` and is printed
+  into the next user turn.
+- `Stop` → `council hook --event stop` → diff review, as before.
+A shared lock (`.council/running.json`, TTL 900 s, child pid checked for liveness, O_EXCL create)
+means only one council run per project at a time. A Stop review that arrives while a consult is
+running is **deferred, not dropped**: its diff fingerprint is stored as `review_due` and the next
+free Stop runs it. A consult is advisory and never writes the diff gate's cache (`worktree`) —
+`council review --if-changed` keeps reporting the last real review. While a run holds the lock, a
+new user message is queued (latest wins) and the running child drains the queue on exit.
 
 ## Layout
 - `council/adapters.py` — one runner per harness. **All CLI flags live here.** Changing a flag
   elsewhere is a bug.
 - `council/protocol.py` — rounds, three-strategy parsers, deterministic merge, work loop.
+  `run_session_consult` is the prompt-time pipeline (message + transcript + diff).
 - `council/prompts.py` — prompts. The output contract goes **last** in each prompt.
+- `council/hooks.py` — Stop and UserPromptSubmit entry points, the shared run lock, the
+  transcript digest, and detached spawns. Hooks must stay fast and never raise.
 - `council/gitutil.py` — diff collection; untracked files are included as full additions.
 - `council/store.py` — `.council/runs/<id>/`; the only shared state between harnesses.
 - `council/cli.py` — argparse. Exit codes: 0 approve, 2 block, 1 error.
@@ -50,6 +68,11 @@ council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
     console-subsystem `python` started by a GUI-less parent allocates a console and flashes a cmd
     window on every turn; the user rejected that. `pythonw` writes to a redirected stdout normally
     (verified with `Start-Process -RedirectStandardOutput`).
+11. **The consult hook is prompt-time, not diff-time.** It fires on every user message; the
+    message is written to `.council/inbox/` and passed as a file path (newline truncation, see
+    quirk 1). It is skipped while `.council/running.json` is fresh (TTL 1800 s) and for 30 s after
+    the previous spawn. The Stop review checks the same lock, so six models never run on one tree.
+    The child releases the lock only with the token it was given - never another run's.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.
