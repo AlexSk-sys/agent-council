@@ -1,9 +1,10 @@
 # STATUS — agent-council
 
 ## Now
-Always-on mode: a Stop hook starts a background review after any turn that changed files, a
-UserPromptSubmit hook surfaces the verdict on the next turn, and a pre-commit gate blocks proved
-blockers. 52 unit tests green. Detection and repair both verified on a seeded bug.
+Always-on mode, quiet: both hooks run `pythonw.exe` in exec form (no shell, no console window), and
+the reviewed project is resolved from the session transcript when cwd is not a repo. 63 unit tests
+green. Verified on the user's other live session (the animated stream cat): its Stop hook resolved
+`stream-cat`, three agents reviewed 9400 chars, verdict `approve` with 5 evidenced findings.
 
 ## Next (max 3)
 1. Use it on a real repo: `council review --diff HEAD` on the next non-trivial change in the user's active project.
@@ -55,3 +56,15 @@ blockers. 52 unit tests green. Detection and repair both verified on a seeded bu
   (593 files, 23.7 MB), so it was made a repository with a baseline commit `1ff90ac` — 9 tracked
   files, `captures/` ignored — and `git_summary` now reports "git repository, clean tree".
   `py -3 -m unittest discover -s tests` → 60 tests OK.
+- **2026-11-14** — hooks re-added in exec form with `pythonw.exe` after the user rejected cmd windows
+  popping up every turn. `pythonw` verified to write to a redirected stdout
+  (`Start-Process -Wait -RedirectStandardOutput` → `STDOUT_OK`), so it suppresses the console without
+  losing the verdict text.
+- **2026-11-14** — END TO END on the user's other live session (topic: animated stream cat, edits
+  `C:\Users\AgentPC\stream-cat\js\cat.js`). Its real transcript fired the Stop hook from
+  `cwd=C:\Users\AgentPC`; `resolve_project` returned `C:\Users\AgentPC\stream-cat`; a review of
+  9400 chars started; **3/3 agents answered** (dsh 190.7 s, opencode 571.6 s) → `approve`,
+  5 findings with evidence, 1 major: the comment claims the bib is shadow-free while the rendered
+  band at design y 762–774 is still dark (145,140,136 vs 244,239,229).
+- **2026-11-14** — `council watch` added: a detached JSONL timeline of diff/state/run/pending events,
+  so "did the hook fire?" is answerable without waiting. 63 tests OK.

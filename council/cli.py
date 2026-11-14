@@ -161,6 +161,27 @@ def cmd_hook(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Record a timeline of hook activity so 'did it run?' has an answer."""
+    from .watch import spawn_watch, stop_watch, watch
+
+    project = Path(args.project or ".").resolve()
+    if args.stop:
+        pid = stop_watch(project)
+        print(f"council: stopped watcher {pid}" if pid else "council: no watcher running",
+              file=sys.stderr)
+        return 0
+    if args.detach:
+        pid = spawn_watch(project, args.interval, args.duration)
+        print(f"council: watching {project} (pid {pid})", file=sys.stderr)
+        print(f"  log: {project / COUNCIL_DIR / 'watch.log'}")
+        return 0
+    log = watch(project, args.interval, args.duration,
+                on_event=lambda kind, detail: print(kind, detail, flush=True))
+    print(f"council: log at {log}")
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     project = Path(args.project or ".").resolve()
     cfg = AgentConfig(name=args.to, timeout_s=args.timeout, posture=args.posture,
@@ -368,6 +389,13 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--cooldown", type=int, default=300,
                    help="minimum seconds between background reviews (default 300)")
     h.set_defaults(func=cmd_hook)
+
+    w = sub.add_parser("watch", help="record whether the hook chain fires in a project")
+    w.add_argument("--interval", type=float, default=10, help="poll seconds (default 10)")
+    w.add_argument("--duration", type=float, default=7200, help="total seconds (default 2h)")
+    w.add_argument("--detach", action="store_true", help="run in the background")
+    w.add_argument("--stop", action="store_true", help="stop a detached watcher")
+    w.set_defaults(func=cmd_watch)
 
     a = sub.add_parser("ask", help="ask one agent a single question")
     a.add_argument("--to", required=True, choices=list(AGENTS))

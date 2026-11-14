@@ -44,8 +44,12 @@ Two hooks in `~/.claude/settings.json` make the review automatic in every projec
 
 | event | command | what it does |
 |---|---|---|
-| `Stop` | `py -3 -m council hook --event stop` | if the working tree changed, starts a **detached background** review. Never blocks a turn, never fails one. Skips a diff that was already reviewed and enforces a 300 s cooldown. |
-| `UserPromptSubmit` | `py -3 -m council hook --event prompt` | prints the last background verdict once, then clears it. |
+| `Stop` | `pythonw.exe` + `args: [-m, council, hook, --event, stop]` | if the working tree changed, starts a **detached background** review. Never blocks a turn, never fails one. Skips a diff that was already reviewed and enforces a 300 s cooldown. |
+| `UserPromptSubmit` | `pythonw.exe` + `args: [-m, council, hook, --event, prompt]` | prints the last background verdict once, then clears it. |
+
+Both hooks use the exec form (`command` + `args`), so no shell and no console window is created;
+`pythonw.exe` still writes to a redirected stdout normally (verified). A console-subsystem `python`
+launched by a GUI-less parent flashes a cmd window on every turn — the user rejected that outright.
 
 Plus a hard gate where it matters: `council init --hook` installs a pre-commit that blocks a commit
 on a proved blocker. It fails **open** if the review cannot run (exit 1) — a flaky API must not stop

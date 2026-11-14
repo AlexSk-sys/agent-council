@@ -76,6 +76,27 @@ def _spawn_review(project: Path) -> None:
         subprocess.Popen(args, **kwargs)
 
 
+def read_payload() -> dict:
+    """Parse the hook payload, tolerating a UTF-8 BOM on stdin.
+
+    PowerShell adds a BOM when it pipes a string into a native command, and
+    json.loads refuses it. Failing there sends the hook down the "no payload"
+    path, which looks exactly like a healthy no-op - verified while simulating
+    a Stop event from a shell.
+    """
+    try:
+        raw = sys.stdin.buffer.read().decode("utf-8-sig", "replace")
+    except (AttributeError, OSError):
+        try:
+            raw = sys.stdin.read()
+        except OSError:
+            return {}
+    try:
+        return json.loads(raw.strip() or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
 def _tail_lines(path: Path, max_bytes: int = 400_000, max_lines: int = 400) -> list[str]:
     try:
         size = path.stat().st_size
@@ -147,10 +168,7 @@ def resolve_project(payload: dict, cwd: Path) -> Path | None:
 
 
 def stop_hook(project: Path, cooldown_s: int = DEFAULT_COOLDOWN_S) -> int:
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except (json.JSONDecodeError, OSError):
-        payload = {}
+    payload = read_payload()
     if payload.get("stop_hook_active"):
         return 0
 
@@ -186,10 +204,7 @@ def stop_hook(project: Path, cooldown_s: int = DEFAULT_COOLDOWN_S) -> int:
 
 
 def prompt_hook(project: Path) -> int:
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except (json.JSONDecodeError, OSError):
-        payload = {}
+    payload = read_payload()
     resolved = resolve_project(payload, Path(project))
     pending = Path(resolved or project) / PENDING_REL
     if not pending.exists():

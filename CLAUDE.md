@@ -46,6 +46,10 @@ council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
    to the newest `file_path` in the session transcript when cwd is not a repo. A folder without
    `.git` can never be reviewed; `council doctor` prints that in one line, and `git_summary` in
    `gitutil.py` is the single place that wording lives.
+10. **Hooks run `pythonw.exe` through the exec form (`command` + `args`), never a shell.** A
+    console-subsystem `python` started by a GUI-less parent allocates a console and flashes a cmd
+    window on every turn; the user rejected that. `pythonw` writes to a redirected stdout normally
+    (verified with `Start-Process -RedirectStandardOutput`).
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

@@ -33,6 +33,7 @@ from council.protocol import (
     parse_peer_reviews,
 )
 from council.store import RunStore, latest_run
+from council.watch import snapshot, stop_watch, watch
 
 
 class TestExtractJson(unittest.TestCase):
@@ -494,6 +495,31 @@ class TestGitSummary(unittest.TestCase):
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
             (root / "a.py").write_text("x = 1\n", encoding="utf-8")
             self.assertIn("will review this", git_summary(root))
+
+
+class TestWatch(unittest.TestCase):
+    def test_snapshot_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            snap = snapshot(root)
+            self.assertGreater(snap["diff_chars"], 0)
+            self.assertTrue(snap["fingerprint"])
+            self.assertEqual(snap["runs"], [])
+
+    def test_watch_writes_start_and_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            log = watch(root, interval=0.05, duration=0.2)
+            events = [json.loads(ln)["event"] for ln in log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events[0], "start")
+            self.assertEqual(events[-1], "stop")
+
+    def test_stop_without_watcher_is_harmless(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(stop_watch(Path(tmp)), 0)
 
 
 class TestStore(unittest.TestCase):
