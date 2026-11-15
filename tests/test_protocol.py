@@ -33,6 +33,7 @@ from council.protocol import (
     Finding,
     PeerReview,
     _prepare_review,
+    _verify_repros_isolated,
     decide_review,
     extract_json_objects,
     merge_diff_review,
@@ -1350,6 +1351,53 @@ class TestWorkPipeline(unittest.TestCase):
             self.assertEqual(out.decision, "block")
             self.assertEqual(out.findings[0].source, "verify")
             self.assertEqual(out.findings[0].status, "confirmed")
+
+    def test_work_repros_do_not_touch_the_live_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                            "commit", "-qm", "init"], cwd=root, check=True)
+            (root / "a.txt").write_text("dirty\n", encoding="utf-8")
+            finding = Finding("major", "x", "e", "dsh", repro="git checkout -- .")
+            _verify_repros_isolated(root, [finding])
+            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "dirty\n")
+            self.assertEqual(finding.status, "refuted")
+
+    def test_work_rechecks_verify_after_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x\n", encoding="utf-8")
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(json.dumps({
+                "pipeline": {"verify": True, "cross": False, "isolate": False,
+                             "lessons": False, "impact": False, "docs": False},
+            }), encoding="utf-8")
+            calls = {"verify": 0}
+
+            def fake_verify(_project):
+                calls["verify"] += 1
+                if calls["verify"] == 1:
+                    return [{"command": "t", "code": 0, "output": "pass"}]
+                return [{"command": "t", "code": 1, "output": "boom"}]
+
+            def fake_agent(agent, prompt, cwd, _cfg):
+                if "You are the EXECUTOR" in prompt:
+                    (Path(cwd) / "a.py").write_text("y\n", encoding="utf-8")
+                    return AgentResult(agent=agent, ok=True, text="## CHANGED\n- a.py")
+                return AgentResult(agent=agent, ok=True, text="VERDICT: APPROVE")
+
+            approved = ([], {"claude": "plan"}, [], "approve", "claude", [], [])
+            with mock.patch("council.project.run_verify", side_effect=fake_verify), \
+                 mock.patch("council.protocol._plan_phase", return_value=approved), \
+                 mock.patch("council.protocol.run_agent", side_effect=fake_agent):
+                out = run_work_loop(root, "do it", max_rounds=0)
+            self.assertGreaterEqual(calls["verify"], 2)
+            self.assertEqual(out.decision, "block")
+            self.assertTrue(any(f.source == "verify" for f in out.findings))
 
 
 class TestPendingStaleness(unittest.TestCase):

@@ -745,6 +745,27 @@ def _prepare_review(project: Path, base_options: dict, trigger: str,
                          verify_results, impact, docs, lessons, tier, reason)
 
 
+def _verify_repros_isolated(project: Path, findings: list[Finding]) -> None:
+    """Run REPROs for the work loop against a disposable snapshot, never the live tree.
+
+    A model-written one-liner such as `git checkout -- .` would otherwise erase
+    the executor's uncommitted work in the project it is reviewing.
+    """
+    snapshot = project_mod.Snapshot(project)
+    workdir = snapshot.prepare()
+    try:
+        if snapshot.dir is None:
+            for finding in findings:
+                if finding.repro:
+                    finding.status = "unverified"
+                    finding.repro_output = "skipped: no isolated snapshot"
+            return
+        project_mod.verify_repros(workdir, findings)
+    finally:
+        if snapshot.dir is not None:
+            snapshot.cleanup()
+
+
 def _verify_failures(ctx: ReviewContext) -> list[Finding]:
     """A failing verify command is a fact, not a model opinion: it blocks."""
     out: list[Finding] = []
@@ -1054,6 +1075,20 @@ def run_work_loop(
             break
         store.write(f"r4/diff-{round_no}.patch", diff)
 
+        # Re-run verify after every executor pass: the earlier PASS describes
+        # code that no longer exists.
+        round_verify = project_mod.run_verify(project) if options.get("verify") else []
+        verify_text = prompts.render_verify(round_verify)
+        round_findings: list[Finding] = []
+        for res in round_verify:
+            if res.get("code") != 0:
+                round_findings.append(Finding(
+                    severity="blocker",
+                    issue=f"project verify command failed: {res.get('command', '')}",
+                    evidence=(res.get("output") or "no output")[-800:],
+                    source="verify", status="confirmed",
+                ))
+
         review_calls = {
             a: (prompts.review_diff_prompt(a, str(project), diff,
                                            review_cfgs[a].posture != "read_only",
@@ -1066,7 +1101,6 @@ def run_work_loop(
         results.extend(round_results)
 
         verdicts: dict[str, str] = {}
-        round_findings: list[Finding] = []
         for res in round_results:
             store.write(f"r4/{res.agent}-{round_no}.raw.md", res.text or f"ERROR: {res.error}\n")
             store.log({"event": "diff_review", "round": round_no, **res.to_dict()})
@@ -1077,10 +1111,8 @@ def run_work_loop(
             verdicts[res.agent] = verdict
             round_findings.extend(parsed)
 
-        project_mod.verify_repros(project, round_findings)
-        blocking = [f for f in round_findings
-                    if f.severity in ("blocker", "major") and f.has_evidence
-                    and f.status != "refuted"]
+        _verify_repros_isolated(project, round_findings)
+        blocking = [f for f in round_findings if f.blocks]
         remaining = blocking
         store.log({"event": "round", "round": round_no, "verdicts": verdicts,
                    "blocking": [f.to_dict() for f in blocking], "diff_stat": stat})

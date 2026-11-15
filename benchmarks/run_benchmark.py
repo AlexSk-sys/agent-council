@@ -8,6 +8,7 @@ tests pass on the seeded tree, so a green verify command proves nothing.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -20,21 +21,21 @@ RESULTS = AGENT_COUNCIL / "benchmarks" / "results.json"
 
 DEFECTS = [
     {"id": "range-off-by-one", "file": "calc.py",
-     "terms": ["off-by-one", "exclusive", "hi + 1", "range(lo, hi)"]},
+     "terms": ["off-by-one", "exclusive", "hi + 1", "upper bound", "range(lo, hi)"]},
     {"id": "average-empty", "file": "calc.py",
-     "terms": ["empty", "zerodivision", "len(values)", "zero values"]},
+     "terms": ["empty", "len(values)", "zero values", "average([])"]},
     {"id": "paginate-overlap", "file": "calc.py",
-     "terms": ["overlap", "per_page", "extra item", "+ 1"]},
+     "terms": ["overlap", "per_page", "extra item", "one extra"]},
     {"id": "group-aliasing", "file": "calc.py",
-     "terms": ["alias", "shallow", "shared", "same list", "returns rows"]},
+     "terms": ["alias", "shallow", "same list", "returns rows", "caller's own"]},
     {"id": "file-leak", "file": "calc.py",
      "terms": ["close", "leak", "file handle", "open("]},
     {"id": "mutable-default", "file": "calc.py",
-     "terms": ["mutable default", "shared default", "default argument", "tags: list"]},
+     "terms": ["mutable default", "shared default", "default argument", "tags=[]"]},
     {"id": "swallowed-error", "file": "calc.py",
-     "terms": ["swallow", "silent", "returns none", "zerodivision"]},
+     "terms": ["swallow", "returns none", "silent", "safe_divide"]},
     {"id": "unicode-slug", "file": "calc.py",
-     "terms": ["unicode", "ascii", "isalnum"]},
+     "terms": ["unicode", "isascii", "non-ascii"]},
 ]
 
 
@@ -45,6 +46,16 @@ def git(*args: str) -> subprocess.CompletedProcess:
 
 def reset_and_seed() -> None:
     git("checkout", "--", ".")
+    council = BENCH / ".council"
+    # Each tier must be cold: lessons written by an earlier tier would turn the
+    # benchmark into a test of hint-following.
+    shutil.rmtree(council / "runs", ignore_errors=True)
+    shutil.rmtree(council / "inbox", ignore_errors=True)
+    for name in ("state.json", "pending.md", "running.json", "checklist.md", "latest"):
+        try:
+            (council / name).unlink()
+        except OSError:
+            pass
     proc = git("apply", "seeded.patch")
     if proc.returncode != 0:
         raise SystemExit(f"seeded.patch failed: {proc.stderr}")
@@ -60,6 +71,24 @@ def newest_run(started: float) -> Path | None:
         if meta.is_file() and meta.stat().st_mtime >= started - 1:
             candidates.append((meta.stat().st_mtime, run))
     return max(candidates)[1] if candidates else None
+
+
+def score(confirmed: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    """Match confirmed findings to seeded defects; duplicates do not inflate recall."""
+    matched_ids: set[str] = set()
+    false_blockers: list[str] = []
+    for finding in confirmed:
+        text = " ".join(str(finding.get(key, "")) for key in
+                        ("issue", "evidence", "repro", "repro_output")).lower()
+        hit = next((d for d in DEFECTS
+                    if "calc" in str(finding.get("file", ""))
+                    and any(term.lower() in text for term in d["terms"])), None)
+        if hit is not None:
+            matched_ids.add(hit["id"])
+        elif finding.get("severity") in ("blocker", "major"):
+            false_blockers.append(str(finding.get("issue", ""))[:120])
+    missed = [d["id"] for d in DEFECTS if d["id"] not in matched_ids]
+    return sorted(matched_ids), missed, false_blockers
 
 
 def run_tier(tier: str) -> dict:
@@ -90,24 +119,7 @@ def run_tier(tier: str) -> dict:
         if event.get("cost_usd"):
             cost += float(event["cost_usd"])
 
-    remaining = list(DEFECTS)
-    matched = []
-    false_blockers = []
-    for finding in confirmed:
-        text = " ".join(str(finding.get(k, "")) for k in
-                        ("issue", "evidence", "repro", "repro_output")).lower()
-        hit = None
-        for defect in remaining:
-            if "calc" in str(finding.get("file", "")) and \
-                    any(term.lower() in text for term in defect["terms"]):
-                hit = defect
-                break
-        if hit:
-            remaining.remove(hit)
-            matched.append(hit["id"])
-        elif finding.get("severity") in ("blocker", "major"):
-            false_blockers.append(finding.get("issue", "")[:120])
-
+    matched, missed, false_blockers = score(confirmed)
     return {
         "tier": tier,
         "tier_reason": meta.get("tier_reason"),
@@ -116,7 +128,7 @@ def run_tier(tier: str) -> dict:
         "exit": proc.returncode,
         "recall": f"{len(matched)}/{len(DEFECTS)}",
         "matched": matched,
-        "missed": [d["id"] for d in remaining],
+        "missed": missed,
         "confirmed": len(confirmed),
         "refuted": len(refuted),
         "false_blockers": false_blockers,
@@ -126,9 +138,42 @@ def run_tier(tier: str) -> dict:
     }
 
 
+def recompute() -> int:
+    rows = json.loads(RESULTS.read_text(encoding="utf-8"))
+    for row in rows:
+        run_name = row.get("run")
+        if not run_name:
+            continue
+        events = BENCH / ".council" / "runs" / run_name / "events.jsonl"
+        confirmed = []
+        for line in events.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event") == "finalize":
+                confirmed = event.get("confirmed") or []
+        matched, missed, false_blockers = score(confirmed)
+        row["recall"] = f"{len(matched)}/{len(DEFECTS)}"
+        row["matched"] = matched
+        row["missed"] = missed
+        row["confirmed"] = len(confirmed)
+        row["false_blockers"] = false_blockers
+        print(json.dumps(row, ensure_ascii=False))
+    RESULTS.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"rescored: {RESULTS}")
+    return 0
+
+
 def main() -> int:
+    if "--recompute" in sys.argv:
+        return recompute()
     if not (BENCH / "seeded.patch").is_file():
         raise SystemExit(f"no seeded.patch in {BENCH}")
+    if RESULTS.exists():
+        archive = RESULTS.with_name("results-first-pass.json")
+        if not archive.exists():
+            archive.write_text(RESULTS.read_text(encoding="utf-8"), encoding="utf-8")
     results = []
     for tier in TIERS:
         print(f"== {tier} ==", flush=True)
