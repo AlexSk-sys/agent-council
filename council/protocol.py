@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import prompts
+from . import project as project_mod
 from .adapters import AGENTS, POSTURES, AgentConfig, AgentResult, run_agent
 from .gitutil import collect_diff, head_commit
 from .store import RunStore
@@ -109,6 +110,9 @@ def _strip_trailing_commas(text: str) -> str:
 
 _LINE_VERDICT = re.compile(r"^\s*VERDICT\s*:\s*(APPROVE|BLOCK)\b", re.I | re.M)
 _LINE_FINDING = re.compile(r"^\s*FINDING\s*:\s*(.+?)\s*$", re.I | re.M)
+_LINE_REPRO = re.compile(r"^\s*REPRO\s*:\s*(.+?)\s*$", re.I | re.M)
+_LINE_CHECK = re.compile(r"^\s*CHECK\s*:\s*(\d+)\s*\|\s*(CONFIRM|REFUTE)\s*\|\s*(.*)$", re.I)
+_LINE_NEW = re.compile(r"^\s*NEW\s*:\s*(.+?)\s*$", re.I)
 _LINE_REVIEW = re.compile(r"^\s*REVIEW\s*:\s*(.+?)\s*$", re.I | re.M)
 _LINE_FIX = re.compile(r"^\s*FIX\s*:\s*(.+?)\s*$", re.I | re.M)
 _LOCATION = re.compile(r"([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,6}):(\d+)")
@@ -252,10 +256,18 @@ class Finding:
     file: str = ""
     line: int = 0
     fix: str = ""
+    repro: str = ""
+    repro_output: str = ""
+    status: str = ""  # "", "unverified", "confirmed", "refuted"
+    checks: list[str] = field(default_factory=list)
 
     @property
     def has_evidence(self) -> bool:
         return bool(self.evidence and self.evidence.strip())
+
+    @property
+    def blocks(self) -> bool:
+        return self.status == "confirmed" and self.severity in ("blocker", "major")
 
     def to_dict(self) -> dict:
         return {
@@ -266,6 +278,10 @@ class Finding:
             "line": self.line,
             "fix": self.fix,
             "source": self.source,
+            "repro": self.repro,
+            "repro_output": self.repro_output,
+            "status": self.status,
+            "checks": self.checks,
         }
 
 
@@ -368,16 +384,25 @@ def parse_diff_review(reviewer: str, text: str) -> tuple[str, list[Finding]]:
                     file=str(raw.get("file", "")).strip(),
                     line=line,
                     fix=str(raw.get("fix", "")).strip(),
+                    repro=str(raw.get("repro", "")).strip(),
                     source=reviewer,
                 )
             )
         return verdict, findings
 
     line_verdict = _LINE_VERDICT.search(text)
-    line_findings = [
-        f for f in (_finding_from_line(m.group(1), reviewer)
-                    for m in _LINE_FINDING.finditer(text)) if f
-    ]
+    line_findings: list[Finding] = []
+    last: Finding | None = None
+    for line in text.splitlines():
+        fm = _LINE_FINDING.match(line)
+        if fm:
+            last = _finding_from_line(fm.group(1), reviewer)
+            if last is not None:
+                line_findings.append(last)
+            continue
+        rm = _LINE_REPRO.match(line)
+        if rm and last is not None:
+            last.repro = rm.group(1).strip()
     if line_verdict or line_findings:
         verdict = line_verdict.group(1).lower() if line_verdict else ""
         if not verdict:
@@ -388,6 +413,29 @@ def parse_diff_review(reviewer: str, text: str) -> tuple[str, list[Finding]]:
     if markdown:
         return _markdown_verdict(text, markdown), markdown
     return "", []
+
+
+def parse_checks(reviewer: str, text: str) -> tuple[dict[int, tuple[str, str]], list[Finding]]:
+    """Parse the cross-examination round: CHECK lines and newly found defects."""
+    checks: dict[int, tuple[str, str]] = {}
+    new_findings: list[Finding] = []
+    last: Finding | None = None
+    for line in text.splitlines():
+        cm = _LINE_CHECK.match(line)
+        if cm:
+            checks[int(cm.group(1))] = (cm.group(2).lower(), cm.group(3).strip())
+            last = None
+            continue
+        nm = _LINE_NEW.match(line)
+        if nm:
+            last = _finding_from_line(nm.group(1), reviewer)
+            if last is not None:
+                new_findings.append(last)
+            continue
+        rm = _LINE_REPRO.match(line)
+        if rm and last is not None:
+            last.repro = rm.group(1).strip()
+    return checks, new_findings
 
 
 # --------------------------------------------------------------------------
@@ -498,45 +546,77 @@ def render_proposal_synthesis(
     return "\n".join(lines)
 
 
+def _render_finding(f: Finding) -> list[str]:
+    loc = f" `{f.file}:{f.line}`" if f.file else ""
+    lines = [f"- **[{f.severity}]**{loc} {f.issue}"]
+    lines.append(f"  - evidence: {f.evidence[:400]}  _(from {f.source})_")
+    if f.repro:
+        first = (f.repro_output or "").splitlines()
+        tail = first[-1][:120] if first else "not run"
+        lines.append(f"  - repro: `{f.repro}` -> {tail}")
+    for check in f.checks[:4]:
+        lines.append(f"  - cross-check: {check[:300]}")
+    return lines
+
+
+def _render_findings_sections(findings: list[Finding]) -> list[str]:
+    confirmed = [f for f in findings if f.status == "confirmed" and f.has_evidence]
+    unverified = [f for f in findings if f.status in ("", "unverified") and f.has_evidence]
+    refuted = [f for f in findings if f.status == "refuted"]
+    discarded = [f for f in findings if not f.has_evidence and f.severity != "info"]
+
+    lines: list[str] = []
+    lines += ["", "## Confirmed (blocking if blocker/major)", ""]
+    if confirmed:
+        for f in sorted(confirmed, key=lambda x: (SEVERITY_ORDER.get(x.severity, 9), x.source)):
+            lines += _render_finding(f)
+    else:
+        lines.append("None.")
+    lines += ["", "## Unverified (not blocking)", ""]
+    if unverified:
+        for f in unverified:
+            lines += _render_finding(f)
+    else:
+        lines.append("None.")
+    if refuted:
+        lines += ["", "## Refuted (repro exit 0 or a peer refuted it)", ""]
+        for f in refuted:
+            lines += _render_finding(f)
+    if discarded:
+        lines += ["", "## Discarded (no evidence supplied)", ""]
+        for f in discarded:
+            lines.append(f"- [{f.severity}] {f.issue} ({f.source})")
+    return lines
+
+
 def render_diff_synthesis(
-    decision: str, verdicts: dict[str, str], findings: list[Finding], diff_stat: str
+    decision: str, verdicts: dict[str, str], findings: list[Finding], diff_stat: str,
+    isolation: str = "",
 ) -> str:
-    lines = ["# Council review", "", f"**Changed:** {diff_stat}", "", "## Verdict", ""]
+    lines = ["# Council review", "", f"**Changed:** {diff_stat}", ""]
+    if isolation:
+        lines += [f"**Snapshot:** {isolation}", ""]
+    lines += ["## Verdict", ""]
     lines.append("**BLOCK**" if decision == "block" else "**APPROVE**")
+    blocking = [f for f in findings if f.blocks]
+    lines.append(f"\n{len(blocking)} confirmed blocker/major finding(s).")
     lines += ["", "| agent | verdict |", "|---|---|"]
     for name in sorted(verdicts):
         lines.append(f"| {name} | {verdicts[name] or 'unparsed'} |")
-
-    ranked = sorted(
-        [f for f in findings if f.has_evidence],
-        key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
-    )
-    lines += ["", "## Findings", ""]
-    if not ranked:
-        lines.append("None with evidence.")
-    for f in ranked:
-        loc = f" `{f.file}:{f.line}`" if f.file else ""
-        lines.append(f"- **[{f.severity}]**{loc} {f.issue}")
-        lines.append(f"  - evidence: {f.evidence}  _(from {f.source})_")
-        if f.fix:
-            lines.append(f"  - fix: {f.fix}")
-
-    undated = [f for f in findings if not f.has_evidence]
-    if undated:
-        lines += ["", "## Discarded (no evidence supplied)", ""]
-        for f in undated:
-            lines.append(f"- [{f.severity}] {f.issue} ({f.source})")
+    lines += _render_findings_sections(findings)
     return "\n".join(lines)
 
 
 def render_consult_synthesis(
     decision: str, verdicts: dict[str, str], findings: list[Finding],
-    user_message: str, diff_stat: str,
+    user_message: str, diff_stat: str, isolation: str = "",
 ) -> str:
     first = next((ln for ln in user_message.strip().splitlines() if ln.strip()), "")
     lines = ["# Council session consult", "", f"**User message:** {first[:300]}", ""]
     if diff_stat:
         lines += [f"**Uncommitted:** {diff_stat}", ""]
+    if isolation:
+        lines += [f"**Snapshot:** {isolation}", ""]
     lines += ["## Verdict", ""]
     if decision == "block":
         lines.append("**BLOCK**")
@@ -544,27 +624,11 @@ def render_consult_synthesis(
         lines.append("**ERROR** - not enough agents answered")
     else:
         lines.append("**APPROVE**")
+    lines.append(f"\n{len([f for f in findings if f.blocks])} confirmed blocker/major finding(s).")
     lines += ["", "| agent | verdict |", "|---|---|"]
     for name in sorted(verdicts):
         lines.append(f"| {name} | {verdicts[name] or 'unparsed'} |")
-
-    ranked = sorted(
-        [f for f in findings if f.has_evidence],
-        key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
-    )
-    lines += ["", "## Findings", ""]
-    if not ranked:
-        lines.append("None with evidence.")
-    for f in ranked:
-        loc = f" `{f.file}:{f.line}`" if f.file else ""
-        lines.append(f"- **[{f.severity}]**{loc} {f.issue}")
-        lines.append(f"  - evidence: {f.evidence}  _(from {f.source})_")
-
-    undated = [f for f in findings if not f.has_evidence]
-    if undated:
-        lines += ["", "## Discarded (no evidence supplied)", ""]
-        for f in undated:
-            lines.append(f"- [{f.severity}] {f.issue} ({f.source})")
+    lines += _render_findings_sections(findings)
     return "\n".join(lines)
 
 
@@ -615,6 +679,139 @@ def _parallel(calls: dict[str, tuple[str, str]], cfgs: dict[str, AgentConfig],
                 on_done(res)
     results.sort(key=lambda r: AGENTS.index(r.agent) if r.agent in AGENTS else 99)
     return results
+
+
+@dataclass
+class ReviewContext:
+    project: Path
+    workdir: Path
+    snapshot: project_mod.Snapshot | None
+    options: dict
+    verify_results: list[dict]
+    impact: str
+    docs: str
+    lessons: str
+
+    @property
+    def verify_text(self) -> str:
+        return prompts.render_verify(self.verify_results)
+
+    @property
+    def isolation(self) -> str:
+        if self.snapshot is None:
+            return "off"
+        meta = self.snapshot.meta
+        if meta.get("isolation") == "worktree":
+            return f"worktree {meta.get('files', 0)} file(s) copied from the working tree"
+        return f"none ({meta.get('reason', 'unavailable')})"
+
+
+def _prepare_review(project: Path, options: dict) -> ReviewContext:
+    snapshot = project_mod.Snapshot(project) if options.get("isolate") else None
+    workdir = snapshot.prepare() if snapshot else Path(project)
+    verify_results = project_mod.run_verify(project) if options.get("verify") else []
+    paths = project_mod.changed_paths(project)
+    impact = project_mod.collect_impact(project, paths) if options.get("impact") else ""
+    docs = project_mod.collect_docs(project) if options.get("impact") else ""
+    lessons = project_mod.load_lessons(project) if options.get("lessons") else ""
+    return ReviewContext(Path(project), Path(workdir), snapshot, options,
+                         verify_results, impact, docs, lessons)
+
+
+def _verify_failures(ctx: ReviewContext) -> list[Finding]:
+    """A failing verify command is a fact, not a model opinion: it blocks."""
+    out: list[Finding] = []
+    for res in ctx.verify_results:
+        if res.get("code") == 0:
+            continue
+        out.append(Finding(
+            severity="blocker",
+            issue=f"project verify command failed: {res.get('command', '')}",
+            evidence=(res.get("output") or "no output")[-800:],
+            source="verify", status="confirmed",
+        ))
+    return out
+
+
+def _cross_round(store, ctx: ReviewContext, agents: list[str],
+                 cfgs: dict[str, AgentConfig], findings: list[Finding],
+                 on_done) -> list[AgentResult]:
+    if not ctx.options.get("cross"):
+        return []
+    numbered = [(i, f) for i, f in enumerate(findings)
+                if f.has_evidence and f.source != "verify"][:8]
+    if not numbered:
+        return []
+    calls: dict[str, tuple[str, str]] = {}
+    for agent in agents:
+        peers = [(n, f) for n, f in numbered if f.source != agent]
+        if not peers:
+            continue
+        lines: list[str] = []
+        for n, f in peers:
+            lines.append(f"{n}. [{f.severity}] {f.file}:{f.line} {f.issue} -- {f.evidence[:300]}")
+            if f.repro:
+                lines.append(f"   REPRO: {f.repro}")
+        calls[agent] = (
+            prompts.verify_findings_prompt(
+                agent, str(ctx.workdir), "\n".join(lines),
+                cfgs[agent].posture != "read_only",
+                f"VERIFY OUTPUT:\n{ctx.verify_text}",
+            ),
+            str(ctx.workdir),
+        )
+    if not calls:
+        return []
+    results = _parallel(calls, {a: cfgs[a] for a in calls}, on_done)
+    for res in results:
+        store.write(f"r2/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
+        store.log({"event": "cross", **res.to_dict()})
+        if not res.ok:
+            continue
+        checks, fresh = parse_checks(res.agent, res.text)
+        for n, (verdict, evidence) in checks.items():
+            if n < 0 or n >= len(findings) or not evidence:
+                continue
+            finding = findings[n]
+            finding.checks.append(f"{res.agent}: {verdict} -- {evidence[:240]}")
+            if finding.status == "confirmed":
+                continue  # an executed non-zero repro is final
+            if verdict == "confirm":
+                finding.status = "confirmed"  # a peer's proof beats a bad repro
+            elif finding.status != "refuted":
+                finding.status = "refuted"
+        findings.extend(fresh)
+    return results
+
+
+def decide_review(verdicts: dict[str, str], findings: list[Finding]) -> str:
+    """A proven blocker/major blocks; otherwise a majority of block votes does."""
+    if any(f.blocks for f in findings):
+        return "block"
+    answered = [v for v in verdicts.values() if v]
+    if answered and sum(1 for v in answered if v == "block") * 2 > len(answered):
+        return "block"
+    return "approve"
+
+
+def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
+                     findings: list[Finding], agents: list[str],
+                     cfgs: dict[str, AgentConfig], on_done):
+    project_mod.verify_repros(ctx.workdir, findings)
+    before = len(findings)
+    cross_results = _cross_round(store, ctx, agents, cfgs, findings, on_done)
+    project_mod.verify_repros(ctx.workdir, findings[before:])
+    decision = decide_review(verdicts, findings)
+    added = 0
+    if ctx.options.get("lessons"):
+        added = project_mod.append_lessons(ctx.project, findings, store.run_id)
+    store.log({
+        "event": "finalize", "decision": decision,
+        "confirmed": [f.to_dict() for f in findings if f.status == "confirmed"],
+        "refuted": [f.to_dict() for f in findings if f.status == "refuted"],
+        "lessons_added": added,
+    })
+    return cross_results, decision, added
 
 
 def _plan_phase(
@@ -895,52 +1092,72 @@ def run_diff_review(
 ) -> CouncilOutcome:
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
+    options = project_mod.pipeline_options(project)
     cfgs = _configs(agents, overrides, posture)
     store = RunStore.for_task(project, f"review-{diff_stat or 'diff'}")
     store.write("diff.patch", diff)
-    store.write_meta({"mode": "review", "diff_stat": diff_stat, "agents": agents,
-                      "posture": posture})
     _attach_prompt_dir(cfgs, store)
-    store.log({"event": "start", "mode": "review", "diff_stat": diff_stat,
-               "agents": agents, "posture": posture})
+    ctx = _prepare_review(project, options)
+    try:
+        store.write_meta({
+            "mode": "review", "diff_stat": diff_stat, "agents": agents,
+            "posture": posture, "options": options,
+            "isolation": ctx.snapshot.meta if ctx.snapshot else {"isolation": "off"},
+            "workdir": str(ctx.workdir),
+            "verify": [r.get("command") for r in ctx.verify_results],
+        })
+        store.log({"event": "start", "mode": "review", "diff_stat": diff_stat,
+                   "agents": agents, "posture": posture, "options": options,
+                   "workdir": str(ctx.workdir)})
 
-    results = _parallel(
-        {a: (prompts.review_diff_prompt(a, str(project), diff,
-                                        cfgs[a].posture != "read_only"),
-             str(project)) for a in agents},
-        cfgs,
-        on_done=on_done,
-    )
+        results = _parallel(
+            {a: (prompts.review_diff_prompt(
+                    a, str(ctx.workdir), diff, cfgs[a].posture != "read_only",
+                    lens=prompts.lens_for(a), verify=ctx.verify_text,
+                    impact=ctx.impact, docs=ctx.docs, lessons=ctx.lessons),
+                 str(ctx.workdir)) for a in agents},
+            cfgs,
+            on_done=on_done,
+        )
 
-    verdicts: dict[str, str] = {}
-    findings: list[Finding] = []
-    for res in results:
-        store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
-        store.log({"event": "diff_review", **res.to_dict()})
-        if not res.ok:
-            verdicts[res.agent] = ""
-            continue
-        verdict, parsed = parse_diff_review(res.agent, res.text)
-        verdicts[res.agent] = verdict
-        findings.extend(parsed)
+        verdicts: dict[str, str] = {}
+        findings: list[Finding] = _verify_failures(ctx)
+        for res in results:
+            store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
+            store.log({"event": "diff_review", **res.to_dict()})
+            if not res.ok:
+                verdicts[res.agent] = ""
+                continue
+            verdict, parsed = parse_diff_review(res.agent, res.text)
+            verdicts[res.agent] = verdict
+            findings.extend(parsed)
 
-    answered = [v for v in verdicts.values() if v]
-    if len(answered) < MIN_AGENTS:
-        synthesis = render_diff_synthesis("error", verdicts, findings, diff_stat)
+        answered = [v for v in verdicts.values() if v]
+        if len(answered) < MIN_AGENTS:
+            synthesis = render_diff_synthesis("error", verdicts, findings, diff_stat,
+                                              ctx.isolation)
+            store.write("synthesis.md", synthesis)
+            return CouncilOutcome("review", "error", findings, [], results, store.dir, synthesis,
+                                  _short("error", "not enough agents answered"))
+
+        cross_results, decision, _ = _finalize_review(
+            store, ctx, verdicts, findings, agents, cfgs, on_done)
+        results = results + cross_results
+        synthesis = render_diff_synthesis(decision, verdicts, findings, diff_stat,
+                                          ctx.isolation)
         store.write("synthesis.md", synthesis)
-        return CouncilOutcome("review", "error", findings, [], results, store.dir, synthesis,
-                              _short("error", "not enough agents answered"))
-
-    decision = merge_diff_review(verdicts, findings)
-    synthesis = render_diff_synthesis(decision, verdicts, findings, diff_stat)
-    store.write("synthesis.md", synthesis)
-    store.log({
-        "event": "synthesis", "decision": decision, "verdicts": verdicts,
-        "findings": [f.to_dict() for f in findings],
-    })
-    blockers = sum(1 for f in findings if f.severity == "blocker" and f.has_evidence)
-    return CouncilOutcome("review", decision, findings, [], results, store.dir, synthesis,
-                          _short(decision, f"{blockers} blocker(s), {len(findings)} finding(s)"))
+        store.log({
+            "event": "synthesis", "decision": decision, "verdicts": verdicts,
+            "findings": [f.to_dict() for f in findings],
+        })
+        blockers = sum(1 for f in findings if f.blocks)
+        return CouncilOutcome("review", decision, findings, [], results, store.dir, synthesis,
+                              _short(decision,
+                                     f"{blockers} confirmed blocker/major, "
+                                     f"{len(findings)} finding(s)"))
+    finally:
+        if ctx.snapshot is not None:
+            ctx.snapshot.cleanup()
 
 
 def run_session_consult(
@@ -964,60 +1181,77 @@ def run_session_consult(
     """
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
+    options = project_mod.pipeline_options(project)
     cfgs = _configs(agents, overrides, posture)
     store = RunStore.for_task(project, f"consult-{user_message.strip()}")
     store.write("session.md", user_message + "\n")
     store.write("context.md", transcript or "(no transcript)\n")
     if diff:
         store.write("diff.patch", diff)
-    store.write_meta({
-        "mode": "consult", "agents": agents, "posture": posture,
-        "prompt_chars": len(user_message), "diff_stat": diff_stat,
-    })
     _attach_prompt_dir(cfgs, store)
-    store.log({"event": "start", "mode": "consult", "agents": agents,
-               "prompt_chars": len(user_message), "diff_chars": len(diff)})
+    ctx = _prepare_review(project, options)
+    try:
+        store.write_meta({
+            "mode": "consult", "agents": agents, "posture": posture,
+            "prompt_chars": len(user_message), "diff_stat": diff_stat,
+            "options": options,
+            "isolation": ctx.snapshot.meta if ctx.snapshot else {"isolation": "off"},
+            "workdir": str(ctx.workdir),
+            "verify": [r.get("command") for r in ctx.verify_results],
+        })
+        store.log({"event": "start", "mode": "consult", "agents": agents,
+                   "prompt_chars": len(user_message), "diff_chars": len(diff),
+                   "options": options, "workdir": str(ctx.workdir)})
 
-    results = _parallel(
-        {a: (prompts.consult_prompt(
-                a, str(project), user_message, transcript, git_state, diff,
-                cfgs[a].posture != "read_only", max_chars),
-             str(project)) for a in agents},
-        cfgs,
-        on_done=on_done,
-    )
+        results = _parallel(
+            {a: (prompts.consult_prompt(
+                    a, str(ctx.workdir), user_message, transcript, git_state, diff,
+                    cfgs[a].posture != "read_only", max_chars,
+                    lens=prompts.lens_for(a), verify=ctx.verify_text,
+                    impact=ctx.impact, docs=ctx.docs, lessons=ctx.lessons),
+                 str(ctx.workdir)) for a in agents},
+            cfgs,
+            on_done=on_done,
+        )
 
-    verdicts: dict[str, str] = {}
-    findings: list[Finding] = []
-    for res in results:
-        store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
-        store.log({"event": "consult", **res.to_dict()})
-        if not res.ok:
-            verdicts[res.agent] = ""
-            continue
-        verdict, parsed = parse_diff_review(res.agent, res.text)
-        verdicts[res.agent] = verdict
-        findings.extend(parsed)
+        verdicts: dict[str, str] = {}
+        findings: list[Finding] = _verify_failures(ctx)
+        for res in results:
+            store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
+            store.log({"event": "consult", **res.to_dict()})
+            if not res.ok:
+                verdicts[res.agent] = ""
+                continue
+            verdict, parsed = parse_diff_review(res.agent, res.text)
+            verdicts[res.agent] = verdict
+            findings.extend(parsed)
 
-    answered = [v for v in verdicts.values() if v]
-    if len(answered) < MIN_AGENTS:
-        synthesis = render_consult_synthesis("error", verdicts, findings,
-                                             user_message, diff_stat)
+        answered = [v for v in verdicts.values() if v]
+        if len(answered) < MIN_AGENTS:
+            synthesis = render_consult_synthesis("error", verdicts, findings,
+                                                 user_message, diff_stat, ctx.isolation)
+            store.write("synthesis.md", synthesis)
+            return CouncilOutcome("consult", "error", findings, [], results, store.dir, synthesis,
+                                  _short("error", "not enough agents answered"))
+
+        cross_results, decision, _ = _finalize_review(
+            store, ctx, verdicts, findings, agents, cfgs, on_done)
+        results = results + cross_results
+        synthesis = render_consult_synthesis(decision, verdicts, findings,
+                                             user_message, diff_stat, ctx.isolation)
         store.write("synthesis.md", synthesis)
-        return CouncilOutcome("consult", "error", findings, [], results, store.dir, synthesis,
-                              _short("error", "not enough agents answered"))
-
-    decision = merge_diff_review(verdicts, findings)
-    synthesis = render_consult_synthesis(decision, verdicts, findings,
-                                         user_message, diff_stat)
-    store.write("synthesis.md", synthesis)
-    store.log({
-        "event": "synthesis", "decision": decision, "verdicts": verdicts,
-        "findings": [f.to_dict() for f in findings],
-    })
-    blockers = sum(1 for f in findings if f.severity == "blocker" and f.has_evidence)
-    return CouncilOutcome("consult", decision, findings, [], results, store.dir, synthesis,
-                          _short(decision, f"{blockers} blocker(s), {len(findings)} finding(s)"))
+        store.log({
+            "event": "synthesis", "decision": decision, "verdicts": verdicts,
+            "findings": [f.to_dict() for f in findings],
+        })
+        blockers = sum(1 for f in findings if f.blocks)
+        return CouncilOutcome("consult", decision, findings, [], results, store.dir, synthesis,
+                              _short(decision,
+                                     f"{blockers} confirmed blocker/major, "
+                                     f"{len(findings)} finding(s)"))
+    finally:
+        if ctx.snapshot is not None:
+            ctx.snapshot.cleanup()
 
 
 def _short(decision: str, detail: str) -> str:

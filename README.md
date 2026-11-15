@@ -39,6 +39,32 @@ opinions invents agreement that is not there.
 * `review`: BLOCK if any agent proved a blocker, or if a majority voted block. An unproven blocker
   does not block — otherwise any agent could veto by asserting things it never checked.
 
+## Review pipeline
+
+`review` and `consult` share one pipeline. Before any model is called:
+
+1. the project's verify command runs (configured with `"verify"`, otherwise detected from
+   `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml` or `*.sln`); a non-zero exit becomes a
+   **confirmed blocker**, with the real output attached;
+2. the changed files are expanded with their callers and recent commits;
+3. `README.md` / `STATUS.md` / `CLAUDE.md` claims and `.council/checklist.md` are collected;
+4. the working tree is copied into a disposable git worktree, and the agents run **there**.
+
+Round 1 sends three **lenses** — correctness (claude), regression & contracts (dsh), tests & docs
+(opencode). Each agent may attach `REPRO: <one-liner>`; the council executes every repro in the
+snapshot: non-zero exit **confirms**, zero **refutes**.
+
+Round 2 is cross-examination: each agent is shown the others' findings and must
+`CHECK: n | CONFIRM|REFUTE | evidence`, and may add `NEW:` findings (repro-verified too).
+
+Exit is hard: any **confirmed** blocker/major blocks; otherwise a majority of block votes blocks;
+otherwise approve. Confirmed blocker/major classes are appended to `.council/checklist.md` and
+injected into later prompts. Every stage can be switched off in `.council/config.json`:
+
+```json
+{"pipeline": {"verify": true, "cross": true, "isolate": true, "lessons": true, "impact": true}}
+```
+
 ## Always on
 
 Two hooks in `~/.claude/settings.json` make the council automatic in every project:

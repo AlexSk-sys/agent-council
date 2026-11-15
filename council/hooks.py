@@ -33,7 +33,7 @@ LOCK_REL = Path(".council") / "running.json"
 INBOX_REL = Path(".council") / "inbox"
 DEFAULT_COOLDOWN_S = 300
 DEFAULT_PROMPT_COOLDOWN_S = 30
-MAX_RUN_S = 900
+MAX_RUN_S = 1800  # verify + two model rounds can outlive one 600 s agent timeout
 
 COUNCIL_GITIGNORE = """*
 !.gitignore
@@ -654,15 +654,19 @@ def write_pending(project: Path, decision: str, findings, run_dir: Path,
                   mode: str = "review") -> None:
     from .protocol import SEVERITY_ORDER
 
+    confirmed = [f for f in findings if getattr(f, "status", "") == "confirmed"]
+    pool = confirmed if confirmed else [f for f in findings if f.has_evidence]
     ranked = sorted(
-        [f for f in findings if f.has_evidence],
+        pool,
         key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
     )
     lines = [f"[background council {mode}] {decision.upper()}: "
-             f"{len(ranked)} finding(s) with evidence"]
+             f"{len(confirmed)} confirmed, {len(findings)} finding(s) total"]
     for f in ranked[:6]:
         loc = f" {f.file}:{f.line}" if f.file else ""
-        lines.append(f"- [{f.severity}]{loc} {f.issue} -- {f.evidence[:180]} ({f.source})")
+        status = getattr(f, "status", "") or "unverified"
+        lines.append(f"- [{f.severity}/{status}]{loc} {f.issue} -- "
+                     f"{f.evidence[:180]} ({f.source})")
     lines.append(f"run: {run_dir}")
     pending = Path(project) / PENDING_REL
     pending.parent.mkdir(parents=True, exist_ok=True)

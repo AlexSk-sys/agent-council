@@ -31,8 +31,10 @@ new user message is queued (latest wins) and the running child drains the queue 
 ## Layout
 - `council/adapters.py` — one runner per harness. **All CLI flags live here.** Changing a flag
   elsewhere is a bug.
-- `council/protocol.py` — rounds, three-strategy parsers, deterministic merge, work loop.
-  `run_session_consult` is the prompt-time pipeline (message + transcript + diff).
+- `council/protocol.py` — rounds, three-strategy parsers, deterministic merge, work loop,
+  the review pipeline (lenses, repro, cross-examination, hard exit).
+- `council/project.py` — model-free context: verify detection/run, impact (changed files, callers,
+  commits), docs, lessons, REPRO execution and the disposable worktree snapshot.
 - `council/prompts.py` — prompts. The output contract goes **last** in each prompt.
 - `council/hooks.py` — Stop and UserPromptSubmit entry points, the shared run lock, the
   transcript digest, and detached spawns. Hooks must stay fast and never raise.
@@ -76,6 +78,18 @@ new user message is queued (latest wins) and the running child drains the queue 
     the same lock, so six models never run on one tree, and a review that arrives during a run is
     deferred (`review_due`). The child releases the lock only with the token it was given - never
     another run's.
+12. **The review pipeline is deterministic-first.** Verify command → snapshot → round 1 → REPRO
+    execution → cross-examination → hard exit. A failing verify command is a confirmed blocker
+    without asking a model. Each stage can be disabled in `.council/config.json` under `pipeline`.
+13. **REPRO commands are model output and are executed.** Only first tokens in `REPRO_TOKENS` are
+    allowed, `REPRO_DENY` is checked, the command runs with a 120 s timeout **inside the
+    disposable worktree**, never in the live tree. Exit non-zero confirms, zero refutes. If
+    isolation is unavailable, a repro still runs in the project root - keep the allowlist tight.
+14. **Only CONFIRMED blocker/major findings block.** Confirmation is an executed repro, a peer
+    CHECK, or a deterministic verify failure. Unverified findings are shown but never veto -
+    otherwise one agent's unproven assertion can block any change.
+15. **Lessons are deduped and never include verify failures.** `.council/checklist.md` is a list
+    of confirmed failure classes, injected into later prompts. A flaky test run is not a class.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

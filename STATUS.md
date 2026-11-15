@@ -1,23 +1,24 @@
 # STATUS — agent-council
 
 ## Now
-Prompt-time council is live: every user message starts a detached three-agent consult
-(user message + transcript tail + uncommitted diff). If a run is active, the message is queued
-(latest wins) and the running child starts it on exit; verdicts are appended to
-`.council/pending.md` and printed into the next user turn. The first live run reviewed this very
-change and returned `BLOCK: 17 finding(s) with evidence`; the automatic Stop review that followed
-returned `BLOCK` again, including a real blocker: a consult used to overwrite the diff gate's
-cache. Fixed since: consult never writes `worktree`, Stop reviews are deferred (`review_due`)
-instead of dropped, the lock is an O_EXCL test-and-set with pid liveness and a 900 s TTL, manual
-`review/task/work/consult` take the lock too, state writes are atomic, pending is append-only,
-`.council/` runtime files are self-ignored, and `--max-chars` is forwarded. 95 unit tests green.
+Prompt-time council with a quality pipeline shared by `review` and `consult`:
+1. the project verify command runs first (config or ecosystem detection); a failure is a
+   **confirmed blocker** with real output;
+2. changed files are expanded with callers and recent commits; README/STATUS/CLAUDE claims and
+   `.council/checklist.md` lessons are injected;
+3. all three agents run in a **disposable git worktree snapshot**, each with its own lens
+   (correctness / regression & contracts / tests & docs);
+4. every finding may carry a `REPRO:` one-liner that the council executes in the snapshot —
+   non-zero confirms, zero refutes;
+5. a cross-examination round lets each agent confirm/refute the others' findings and add new ones;
+6. **only confirmed blocker/major findings block**; confirmed classes are appended to the lessons
+   checklist. 111 unit tests green. Live E2E on the game repo is running (see Verified when done).
 
 ## Next (max 3)
-1. Confirm the deferred-review path live: change a file while a consult holds the lock, then let
-   the next Stop run and check that a `-review-` run directory appears for the newer diff.
-2. Measure the cost envelope of one consult per message (30 s cooldown, read-only posture):
-   model calls, latency, pending noise over a day of real use.
-3. Optional: per-project model override so the three peers are not all on the same model route.
+1. Finish the live E2E of the full pipeline on the game repo and record the verdict/findings here.
+2. Measure the pipeline on the seeded-bug benchmark: recall, false blockers, time, $ (this is the
+   before/after evidence for the quality claim).
+3. Decide whether `work` should adopt the same verify/repro/lessons stages.
 
 ## Blocked
 - Nothing.
@@ -29,8 +30,33 @@ instead of dropped, the lock is an O_EXCL test-and-set with pid liveness and a 9
   running council instead of doubling the model calls.
 - Sessions outside a git repo are consulted on purpose (the user asked for every session);
   the Stop diff review remains repo-only because there is nothing to diff.
+- The snapshot worktree has no `node_modules`/virtualenv; repros that need installed dependencies
+  may fail there. The verify command itself runs in the live project, where they exist.
+- REPRO commands are model output. The allowlist, deny list, 120 s timeout and disposable
+  snapshot bound the damage, but they still execute code - keep the allowlist tight.
+- Unverified findings are shown but never block; a finding is only a gate once a repro, a peer
+  CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — full pipeline E2E on the game repo with a seeded defect (a combo-bonus
+  scoring change shipped without a test): verify `npm test` **PASS** (13 tests) → snapshot
+  worktree with 1 copied file → round 1 (claude 104.0 s $0.2461, dsh 150.0 s, opencode 85.3 s)
+  → 9 findings → REPRO runs: **3 confirmed majors**, each agent independently reverted the bonus
+  line and showed the suite stays green → cross round (claude 262.1 s $0.5002, dsh 119.6 s,
+  opencode 117.6 s) confirmed them → `BLOCK: 3 confirmed blocker/major, 9 finding(s)`, exit 2.
+  The same run caught real encoding damage (BOM + cp1251 mojibake) with an executable repro.
+  Total model cost **$0.7463**, wall ~7 min. The seeded change was reverted; the game repo is clean.
+- **2026-11-15** — regression from that run: a REPRO that exits 0 despite a real defect used to
+  refute it; a peer `CHECK ... CONFIRM` now overrides a zero-exit repro. Lessons dedupe by
+  `file:line:severity` as well as wording, so three peers describing one defect add one lesson.
+  `Ran 113 tests ... OK`.
+- **2026-11-15** — quality pipeline implemented: verify detection/run, disposable worktree
+  snapshot (`Snapshot`), lenses, `REPRO` parsing + execution, cross-examination (`CHECK`/`NEW`),
+  hard exit (`decide_review`), impact context, doc claims, lessons checklist.
+  `py -3 -m unittest discover -s tests` → `Ran 111 tests ... OK`.
+- **2026-11-15** — new unit coverage: `TestReproParsing`, `TestParseChecks`, `TestDecideReview`,
+  `TestProjectContext` (verify detection and override, allowlist, confirmed/refuted/blocked
+  repros, lesson dedup, pipeline options, snapshot copies the working tree and cleans up).
 - **2026-11-15** — live consult E2E: `{"prompt": "...", "transcript_path": "..."} | pythonw.exe -m
   council hook --event prompt` → exit 0, `.council/running.json` written, detached child,
   `council consult: 3 agents, prompt 142 chars, transcript 2661 chars, diff 37544 chars`.

@@ -18,6 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from council import prompts
+from council import project as project_mod
 from council.adapters import AgentConfig, AgentResult, _materialize_prompt
 from council.gitutil import git_summary, is_noise
 from council.cli import _collect_diff, main
@@ -31,9 +32,11 @@ from council.protocol import (
     CouncilOutcome,
     Finding,
     PeerReview,
+    decide_review,
     extract_json_objects,
     merge_diff_review,
     merge_proposals,
+    parse_checks,
     parse_diff_review,
     parse_peer_reviews,
     run_session_consult,
@@ -621,11 +624,13 @@ class TestConsultPrompt(unittest.TestCase):
 
 
 class TestSessionConsult(unittest.TestCase):
-    def _fake(self, texts: dict[str, str]):
-        def fake(agent, *_args):
-            _ = _args
-            return AgentResult(agent=agent, ok=True,
-                               text=texts.get(agent, "VERDICT: APPROVE"))
+    def _fake(self, texts: dict[str, str], checks: dict[str, str] | None = None):
+        def fake(agent, prompt, *_args):
+            if "REFUTE" in prompt:
+                text = (checks or {}).get(agent, "VERDICT: APPROVE")
+            else:
+                text = texts.get(agent, "VERDICT: APPROVE")
+            return AgentResult(agent=agent, ok=True, text=text)
         return fake
 
     def test_all_three_answer_approve(self):
@@ -639,14 +644,56 @@ class TestSessionConsult(unittest.TestCase):
             self.assertTrue((out.run_dir / "session.md").exists())
             self.assertTrue((out.run_dir / "context.md").exists())
 
-    def test_evidenced_blocker_blocks(self):
+    def test_repro_exit_nonzero_confirms_and_blocks(self):
         texts = {"dsh": "VERDICT: BLOCK\n"
-                        "FINDING: blocker | a.py:1 | boom | read a.py:1"}
+                        "FINDING: blocker | a.py:1 | boom | read a.py:1\n"
+                        "REPRO: python -c \"raise SystemExit(1)\""}
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
                 out = run_session_consult(Path(tmp), "hello")
             self.assertEqual(out.decision, "block")
-            self.assertEqual(out.findings[0].source, "dsh")
+            self.assertEqual(out.findings[0].status, "confirmed")
+
+    def test_repro_exit_zero_refutes_and_approves(self):
+        texts = {"dsh": "VERDICT: BLOCK\n"
+                        "FINDING: blocker | a.py:1 | boom | read a.py:1\n"
+                        "REPRO: python -c \"raise SystemExit(0)\""}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.findings[0].status, "refuted")
+            self.assertEqual(out.decision, "approve")
+
+    def test_peer_confirm_makes_a_finding_block(self):
+        texts = {"dsh": "VERDICT: BLOCK\nFINDING: major | a.py:1 | boom | read a.py:1"}
+        checks = {"claude": "CHECK: 0 | CONFIRM | read a.py:1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent",
+                            side_effect=self._fake(texts, checks)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.findings[0].status, "confirmed")
+            self.assertEqual(out.decision, "block")
+
+    def test_unconfirmed_finding_does_not_block(self):
+        texts = {"dsh": "VERDICT: BLOCK\nFINDING: major | a.py:1 | boom | read a.py:1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.findings[0].status, "unverified")
+            self.assertEqual(out.decision, "approve")
+
+    def test_peer_confirm_beats_a_bad_zero_exit_repro(self):
+        """A repro that exits 0 despite a real defect must not veto a peer's proof."""
+        texts = {"dsh": "VERDICT: BLOCK\n"
+                        "FINDING: major | a.py:1 | boom | read a.py:1\n"
+                        "REPRO: py -3 -c \"raise SystemExit(0)\""}
+        checks = {"claude": "CHECK: 0 | CONFIRM | read a.py:1, the term is absent"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent",
+                            side_effect=self._fake(texts, checks)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.findings[0].status, "confirmed")
+            self.assertEqual(out.decision, "block")
 
     def test_unevidenced_blocker_does_not_block(self):
         texts = {"dsh": "VERDICT: BLOCK\nFINDING: blocker | | boom |"}
@@ -955,6 +1002,144 @@ class TestConsultCommand(unittest.TestCase):
                 main(["--project", str(root), "consult",
                       "--prompt-file", str(prompt_file), "--max-chars", "1234"])
             self.assertEqual(run.call_args.kwargs["max_chars"], 1234)
+
+
+class TestReproParsing(unittest.TestCase):
+    def test_repro_attaches_to_the_preceding_finding(self):
+        text = ("VERDICT: BLOCK\n"
+                "FINDING: major | a.py:7 | boom | read a.py:7\n"
+                "REPRO: node -e \"process.exit(1)\"\n"
+                "FINDING: minor | b.py:1 | typo | read b.py:1\n")
+        verdict, findings = parse_diff_review("dsh", text)
+        self.assertEqual(verdict, "block")
+        self.assertEqual(findings[0].repro, 'node -e "process.exit(1)"')
+        self.assertEqual(findings[1].repro, "")
+
+    def test_json_repro(self):
+        text = json.dumps({"verdict": "block", "findings": [
+            {"severity": "major", "issue": "x", "evidence": "e", "repro": "node -e 1"}]})
+        _, findings = parse_diff_review("dsh", text)
+        self.assertEqual(findings[0].repro, "node -e 1")
+
+
+class TestParseChecks(unittest.TestCase):
+    def test_checks_and_new_findings(self):
+        text = ("CHECK: 0 | CONFIRM | ran x, saw y\n"
+                "CHECK: 1 | REFUTE | handled at a.py:9\n"
+                "NEW: major | c.py:3 | missed | read c.py:3\n"
+                "REPRO: py -3 -c \"raise SystemExit(1)\"\n")
+        checks, new = parse_checks("claude", text)
+        self.assertEqual(checks[0], ("confirm", "ran x, saw y"))
+        self.assertEqual(checks[1][0], "refute")
+        self.assertEqual(len(new), 1)
+        self.assertEqual(new[0].repro, 'py -3 -c "raise SystemExit(1)"')
+
+
+class TestDecideReview(unittest.TestCase):
+    def test_confirmed_major_blocks(self):
+        f = Finding("major", "x", "ev", "dsh", status="confirmed")
+        self.assertEqual(decide_review({"claude": "approve"}, [f]), "block")
+
+    def test_unverified_does_not_block(self):
+        f = Finding("blocker", "x", "ev", "dsh", status="unverified")
+        self.assertEqual(decide_review({"claude": "approve", "dsh": "block"}, [f]),
+                         "approve")
+
+    def test_majority_block_blocks(self):
+        self.assertEqual(
+            decide_review({"claude": "block", "dsh": "block", "opencode": "approve"}, []),
+            "block")
+
+
+class TestProjectContext(unittest.TestCase):
+    def test_detect_verify_from_package_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"scripts": {"test": "node --test"}}',
+                                               encoding="utf-8")
+            self.assertEqual(project_mod.detect_verify_commands(root), ["npm test"])
+
+    def test_config_override_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(
+                json.dumps({"verify": ["node --test"]}), encoding="utf-8")
+            self.assertEqual(project_mod.detect_verify_commands(root), ["node --test"])
+
+    def test_repro_allowlist(self):
+        self.assertTrue(project_mod.repro_allowed('node -e "process.exit(1)"'))
+        self.assertTrue(project_mod.repro_allowed("py -3 -c \"raise SystemExit(1)\""))
+        self.assertFalse(project_mod.repro_allowed("rm -rf /"))
+        self.assertFalse(project_mod.repro_allowed("curl https://example.com"))
+        self.assertFalse(project_mod.repro_allowed(""))
+
+    def test_verify_repros_confirms_refutes_and_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad = Finding("major", "x", "e", "dsh",
+                          repro='py -3 -c "raise SystemExit(1)"')
+            good = Finding("major", "y", "e", "dsh",
+                           repro='py -3 -c "raise SystemExit(0)"')
+            none = Finding("minor", "z", "e", "dsh")
+            blocked = Finding("major", "w", "e", "dsh", repro="rm -rf /")
+            project_mod.verify_repros(root, [bad, good, none, blocked])
+            self.assertEqual(bad.status, "confirmed")
+            self.assertEqual(good.status, "refuted")
+            self.assertEqual(none.status, "unverified")
+            self.assertEqual(blocked.status, "unverified")
+            self.assertTrue(blocked.repro_output.startswith("blocked"))
+
+    def test_lessons_are_deduplicated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            f = Finding("major", "silent child death", "hooks.py:1", "claude",
+                        status="confirmed")
+            self.assertEqual(project_mod.append_lessons(root, [f], "run-1"), 1)
+            self.assertEqual(project_mod.append_lessons(root, [f], "run-2"), 0)
+            text = project_mod.load_lessons(root)
+            self.assertEqual(text.count("silent child death"), 1)
+
+    def test_lessons_dedupe_the_same_defect_from_another_peer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = Finding("major", "bonus has no test", "logic.js:41", "claude",
+                            status="confirmed")
+            second = Finding("major", "no test covers the bonus", "logic.js:41", "dsh",
+                             status="confirmed")
+            self.assertEqual(project_mod.append_lessons(root, [first], "run-1"), 1)
+            self.assertEqual(project_mod.append_lessons(root, [second], "run-2"), 0)
+
+    def test_pipeline_options_defaults_and_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertTrue(all(project_mod.pipeline_options(root).values()))
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(
+                json.dumps({"pipeline": {"cross": False}}), encoding="utf-8")
+            opts = project_mod.pipeline_options(root)
+            self.assertFalse(opts["cross"])
+            self.assertTrue(opts["verify"])
+
+    def test_snapshot_copies_the_working_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                            "commit", "-qm", "init"], cwd=root, check=True)
+            (root / "a.py").write_text("two\n", encoding="utf-8")
+            (root / "new.py").write_text("new\n", encoding="utf-8")
+            snap = project_mod.Snapshot(root)
+            workdir = snap.prepare()
+            try:
+                self.assertNotEqual(workdir, root.resolve())
+                self.assertEqual((workdir / "a.py").read_text(encoding="utf-8"), "two\n")
+                self.assertEqual((workdir / "new.py").read_text(encoding="utf-8"), "new\n")
+            finally:
+                snap.cleanup()
+            self.assertFalse(workdir.exists())
 
 
 if __name__ == "__main__":

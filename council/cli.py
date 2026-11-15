@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -53,17 +54,25 @@ def _progress(res) -> None:
 def _print_outcome(out: CouncilOutcome) -> None:
     print()
     print(out.summary)
-    ranked = sorted(
-        [f for f in out.findings if f.has_evidence],
+    confirmed = sorted(
+        [f for f in out.findings if f.status == "confirmed" and f.has_evidence],
         key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
     )
-    shown = ranked[:12]
+    unverified = sorted(
+        [f for f in out.findings if f.status in ("", "unverified") and f.has_evidence],
+        key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
+    )
+    shown = confirmed[:10] + unverified[:4]
     if shown:
         print()
         for f in shown:
             loc = f" {f.file}:{f.line}" if f.file else ""
-            print(f"  [{f.severity}] {f.issue}{loc}")
+            status = f.status or "unverified"
+            print(f"  [{f.severity}/{status}] {f.issue}{loc}")
             print(f"           evidence: {f.evidence[:200]}  ({f.source})")
+            if f.repro:
+                tail = (f.repro_output or "").strip().splitlines()
+                print(f"           repro: {f.repro} -> {tail[-1][:120] if tail else 'not run'}")
     discarded = len([f for f in out.findings if not f.has_evidence])
     if discarded:
         print(f"\n  ({discarded} finding(s) discarded: no evidence supplied)")
@@ -85,7 +94,7 @@ def _acquire_cli_lock(project: Path, args: argparse.Namespace, kind: str) -> str
     if getattr(args, "lock_token", None):
         return None
     token = uuid.uuid4().hex
-    if not acquire_lock(project, kind, token):
+    if not acquire_lock(project, kind, token, pid=os.getpid()):
         print(f"council: another council run is active in {project}", file=sys.stderr)
         return ""
     return token
@@ -364,8 +373,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project or ".").resolve()
     print(f"probing 3 harnesses in {project}")
     from .gitutil import git_summary
+    from .project import detect_verify_commands
 
     print(f"  git: {git_summary(project)}")
+    verify_cmds = detect_verify_commands(project)
+    print(f"  verify: {', '.join(verify_cmds) if verify_cmds else 'not detected'}")
     worst = 0
     for name in AGENTS:
         res = run_agent(name, "Reply with exactly one word: PONG",
@@ -388,6 +400,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         cfg_path.write_text(json.dumps({
             "agents": list(AGENTS),
             "review": {"max_chars": 60000},
+            "pipeline": {"verify": True, "cross": True, "isolate": True,
+                         "lessons": True, "impact": True},
+            "verify": [],
             "overrides": {
                 "claude": {"timeout_s": 600},
                 "dsh": {"timeout_s": 600},

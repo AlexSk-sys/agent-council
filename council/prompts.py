@@ -91,6 +91,23 @@ accepted. Your job is to find defects in the change below. You have the real
 repository: read the surrounding code, run commands, and verify every claim
 before you make it.
 
+YOUR LENS: {lens}
+Your peers cover the other lenses, so go deep on yours instead of repeating
+general remarks.
+
+VERIFY COMMAND AND ITS REAL OUTPUT (run by the council before this round):
+{verify}
+
+CHANGED FILES IN FULL, THEIR CALLERS AND RECENT COMMITS:
+{impact}
+
+PROJECT DOCS (claims that must match the code):
+{docs}
+
+KNOWN FAILURE CLASSES FROM EARLIER CONFIRMED FINDINGS - check these first:
+{lessons}
+
+THE CHANGE:
 {diff}
 
 Check specifically:
@@ -101,18 +118,27 @@ Check specifically:
    left open?
 4. Is anything asserted without proof - a comment, docstring or report claiming
    behaviour that the code does not implement?
+5. Test gap: for each changed function, name the test that fails if the change is
+   reverted. If no such test exists, file a major finding.
+6. Docs: if the change makes a claim in README/STATUS/CLAUDE false, file a finding.
 
 Reply with ONLY lines in this format, nothing else - no headings, no prose, no
 code fences:
 
 VERDICT: <APPROVE|BLOCK>
 FINDING: <blocker|major|minor> | <file>:<line> | <one-line issue> | <evidence>
+REPRO: <one-line command, optional, for the FINDING above>
 
 Rules:
 - One FINDING line per defect, most severe first, at most 8.
 - BLOCK if any blocker exists, otherwise APPROVE.
 - Evidence must be what you ran or read (command output, or the exact code).
   A finding with no evidence is invalid - leave it out.
+- REPRO must be a command that exits NON-ZERO while the defect is present and
+  zero when it is fixed (an assert, a failing test, a one-liner). The council
+  runs it in a disposable snapshot; exit 0 refutes the finding.
+- REPRO may only start with: node, python, py, pytest, npm, npx, dotnet, go,
+  cargo, git. It runs in the repository root.
 - Do not restate the diff. Do not praise.
 """
 
@@ -129,6 +155,9 @@ You are joining an active coding session. The user has just sent the message
 below and the main agent is about to act on it. Your job is to catch what that
 agent is about to get wrong, before it does.
 
+YOUR LENS: {lens}
+Your peers cover the other lenses.
+
 USER'S LATEST MESSAGE:
 {message}
 
@@ -138,6 +167,18 @@ RECENT SESSION (transcript tail, oldest first):
 REPOSITORY STATE:
 {git_state}
 
+VERIFY COMMAND AND ITS REAL OUTPUT (run by the council before this round):
+{verify}
+
+CHANGED FILES IN FULL, THEIR CALLERS AND RECENT COMMITS:
+{impact}
+
+PROJECT DOCS (claims that must match the code):
+{docs}
+
+KNOWN FAILURE CLASSES FROM EARLIER CONFIRMED FINDINGS - check these first:
+{lessons}
+
 Uncommitted change under discussion:
 {diff}
 
@@ -146,19 +187,51 @@ Check specifically:
 2. What would break in the files involved? Read them before claiming anything.
 3. Is the session about to assert something it has not verified?
 4. If there is an uncommitted diff, does it contain a defect?
+5. Test gap: for each changed function, name the test that fails if the change is
+   reverted. If no such test exists, file a major finding.
+6. Docs: if the change makes a claim in README/STATUS/CLAUDE false, file a finding.
 
 Reply with ONLY lines in this format, nothing else - no headings, no prose, no
 code fences:
 
 VERDICT: <APPROVE|BLOCK>
 FINDING: <blocker|major|minor> | <file>:<line> | <one-line issue> | <evidence>
+REPRO: <one-line command, optional, for the FINDING above>
 
 Rules:
 - One FINDING line per defect, most severe first, at most 6.
 - BLOCK only if a blocker exists, otherwise APPROVE.
 - Evidence must be a file:line you read or code you quoted. A finding with no
   evidence is invalid - leave it out.
+- REPRO must exit NON-ZERO while the defect is present and zero when fixed; the
+  council runs it in a disposable snapshot and exit 0 refutes the finding.
+- REPRO may only start with: node, python, py, pytest, npm, npx, dotnet, go,
+  cargo, git. It runs in the repository root.
 - If you have nothing to add, reply with the single line VERDICT: APPROVE.
+"""
+
+VERIFY_FINDINGS = HEADER + """
+A first review round produced the findings below. Your job is to REFUTE them,
+not to agree. For each numbered finding, read the code and run its REPRO when
+one is present. CONFIRM only if the defect is real and would cause the stated
+harm; REFUTE if it is wrong, already handled, or cannot happen.
+
+FINDINGS:
+{findings}
+
+{context}
+
+Reply with ONLY lines in this format, nothing else:
+
+CHECK: <number> | <CONFIRM|REFUTE> | <evidence: command output or file:line>
+NEW: <blocker|major|minor> | <file>:<line> | <one-line issue> | <evidence>
+REPRO: <one-line command for the NEW line above, optional>
+
+Rules:
+- One CHECK line per finding. Evidence is required; a CHECK without evidence
+  is ignored.
+- NEW lines are for defects the first round missed. Keep them evidenced.
+- Do not repeat a finding that is already listed.
 """
 
 EXECUTE = HEADER + """
@@ -269,9 +342,14 @@ def review_proposals_prompt(agent: str, task: str, project: str, peers: dict[str
 
 
 def review_diff_prompt(agent: str, project: str, diff: str, allow_shell: bool = False,
-                       max_chars: int = 60000) -> str:
+                       max_chars: int = 60000, lens: str | None = None,
+                       verify: str = "", impact: str = "", docs: str = "",
+                       lessons: str = "") -> str:
     trimmed = diff if len(diff) <= max_chars else diff[:max_chars] + "\n... [diff truncated]"
-    return REVIEW_DIFF.format(diff=trimmed, **_header(agent, project, allow_shell))
+    return REVIEW_DIFF.format(
+        diff=trimmed, lens=lens or lens_for(agent), **_context_blocks(verify, impact, docs, lessons),
+        **_header(agent, project, allow_shell),
+    )
 
 
 def ask_prompt(agent: str, project: str, question: str, allow_shell: bool = False) -> str:
@@ -282,15 +360,63 @@ def ask_prompt(agent: str, project: str, question: str, allow_shell: bool = Fals
 
 def consult_prompt(agent: str, project: str, message: str, transcript: str,
                    git_state: str, diff: str, allow_shell: bool = False,
-                   max_chars: int = 60000) -> str:
+                   max_chars: int = 60000, lens: str | None = None,
+                   verify: str = "", impact: str = "", docs: str = "",
+                   lessons: str = "") -> str:
     trimmed = diff if len(diff) <= max_chars else diff[:max_chars] + "\n... [diff truncated]"
     return CONSULT.format(
         message=message.strip()[:8000],
         transcript=transcript.strip() or "(no recent turns)",
         git_state=git_state or "(unknown)",
         diff=trimmed.strip() or "(no uncommitted change)",
+        lens=lens or lens_for(agent),
+        **_context_blocks(verify, impact, docs, lessons),
         **_header(agent, project, allow_shell),
     )
+
+
+def verify_findings_prompt(agent: str, project: str, findings_text: str,
+                           allow_shell: bool = False, context: str = "") -> str:
+    return VERIFY_FINDINGS.format(
+        findings=findings_text.strip() or "(no findings)",
+        context=context.strip(),
+        **_header(agent, project, allow_shell),
+    )
+
+
+LENSES = {
+    "claude": ("CORRECTNESS - invalid inputs, edge cases, error paths, resource "
+               "handling, and whether the code does what it claims."),
+    "dsh": ("REGRESSION & CONTRACTS - callers, public interfaces, data formats, "
+            "concurrency, and what breaks outside the changed lines."),
+    "opencode": ("TESTS & DOCS - the test that would fail if the change were "
+                 "reverted, coverage gaps, and README/STATUS/CLAUDE claims that "
+                 "are now false."),
+}
+
+
+def lens_for(agent: str) -> str:
+    return LENSES.get(agent, LENSES["claude"])
+
+
+def _context_blocks(verify: str, impact: str, docs: str, lessons: str) -> dict:
+    return {
+        "verify": verify or "(no verify command detected)",
+        "impact": impact or "(no changed files to expand)",
+        "docs": docs or "(no project docs)",
+        "lessons": lessons or "(none recorded yet)",
+    }
+
+
+def render_verify(results: list[dict]) -> str:
+    if not results:
+        return "(no verify command detected for this project)"
+    blocks = []
+    for res in results:
+        code = res.get("code")
+        status = "PASS" if code == 0 else f"FAIL (exit {code})"
+        blocks.append(f"$ {res.get('command', '')}\n{status}\n{res.get('output', '')[-3000:]}")
+    return "\n\n".join(blocks)
 
 
 def json_contract_example() -> str:
