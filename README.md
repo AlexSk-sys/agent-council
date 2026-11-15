@@ -186,6 +186,6 @@ council/prompts.py    every prompt, with the output contract at the end
 council/gitutil.py    diff collection, including untracked files
 council/store.py      .council/runs/<id>/ — the only shared memory between harnesses
 council/cli.py        argparse entry point
-tests/                134 unit tests, no network
+tests/                136 unit tests, no network
 sandbox/              gitignored fixture repo used for the E2E test
 ```

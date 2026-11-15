@@ -1,0 +1,115 @@
+[
+  {
+    "tier": "lean",
+    "tier_reason": "forced by --tier",
+    "decision": "block",
+    "exit": 2,
+    "recall": "8/8",
+    "matched": [
+      "paginate-overlap",
+      "group-aliasing",
+      "average-empty",
+      "mutable-default",
+      "file-leak",
+      "unicode-slug",
+      "range-off-by-one",
+      "swallowed-error"
+    ],
+    "missed": [],
+    "confirmed": 24,
+    "refuted": 0,
+    "false_blockers": [
+      "parse_range drops the upper bound (returns [1,2,3,4] for \"1-5\", [] for \"3-3\") while its own docstring on line 7 and READ",
+      "slugify's added isascii() filter turns every non-ASCII letter into '-', so unicode text is mangled instead of transliter",
+      "add_tag uses a mutable default `tags=[]`, so state leaks across calls and separate calls share one list",
+      "safe_divide returns None on division by zero, violating its -> float contract and swallowing the error it used to raise ",
+      "group_rows no longer copies rows, so it returns the caller's own nested lists and mutations propagate",
+      "paginate returns one extra item per page, so consecutive pages overlap by one element",
+      "read_points leaks the file handle; the file is never closed deterministically",
+      "slugify mangles non-ASCII alphanumerics into dashes, breaking unicode slugs",
+      "test_parse_range, test_paginate and test_safe_divide were rewritten to assert the defective values, so the suite now fai",
+      "the docstring says it parses \"1-5\" into the five elements [1, 2, 3, 4, 5], but line 11 returns range(lo, hi); the lo>hi ",
+      "paginate returns per_page+1 items, so every page overlaps the next (items 0-3 for per_page 3, next page starts at 3) and",
+      "average lost its empty-input guard so average([]) raises ZeroDivisionError, and reverting only this function leaves the ",
+      "the isolation assertion was deleted from test_group_rows_copies (name still says \"copies\"), so nothing fails when group_",
+      "read_points drops the with-block so every call leaks an open file handle; the suite already prints the ResourceWarning a",
+      "the mutable default list is shared across calls, so tags accumulate between unrelated callers, and test_add_tag_isolated",
+      "the isascii() filter drops every non-ASCII character, so Cyrillic slugs collapse to an empty string and accented letters"
+    ],
+    "seconds": 269.5,
+    "cost_usd": 0.4256,
+    "run": "20261115-130057-review-calc-py-25-tests-test-cal"
+  },
+  {
+    "tier": "standard",
+    "tier_reason": "forced by --tier",
+    "decision": "block",
+    "exit": 2,
+    "recall": "6/8",
+    "matched": [
+      "file-leak",
+      "average-empty",
+      "range-off-by-one",
+      "paginate-overlap",
+      "group-aliasing",
+      "swallowed-error"
+    ],
+    "missed": [
+      "mutable-default",
+      "unicode-slug"
+    ],
+    "confirmed": 11,
+    "refuted": 12,
+    "false_blockers": [
+      "group_rows returns the caller's own list instead of a copy, so mutating the result mutates the input; test_group_rows_co",
+      "read_points opens the file with no with/close: the handle survives until garbage collection on the success path and stay",
+      "test_parse_range, test_paginate and test_safe_divide were rewritten to assert the changed values, so the suite now fails",
+      "the change rewrites five tests to assert the defective values (parse_range, paginate, safe_divide, group_rows, add_tag),",
+      "the quoted VERIFY OUTPUT cannot come from this tree: it cites \"C:\\Users\\AgentPC\\source\\repos\\council-benchmark\\tests\\tes"
+    ],
+    "seconds": 452.9,
+    "cost_usd": 0.5219,
+    "run": "20261115-130526-review-calc-py-25-tests-test-cal"
+  },
+  {
+    "tier": "full",
+    "tier_reason": "forced by --tier",
+    "decision": "block",
+    "exit": 2,
+    "recall": "8/8",
+    "matched": [
+      "file-leak",
+      "average-empty",
+      "swallowed-error",
+      "paginate-overlap",
+      "range-off-by-one",
+      "mutable-default",
+      "group-aliasing",
+      "unicode-slug"
+    ],
+    "missed": [],
+    "confirmed": 26,
+    "refuted": 1,
+    "false_blockers": [
+      "read_points opens the file with no with/close, leaking the handle (on Windows the file stays locked until GC) and leakin",
+      "group_rows returns the caller's own row objects instead of copies, so mutating a result silently mutates the input, and ",
+      "suite was rewritten to certify the seeded values (parse_range/paginate/safe_divide asserts inverted, group_rows isolatio",
+      "docstring promises \"1-5\" into [1, 2, 3, 4, 5] but the return changed to range(lo, hi), and the lo>hi guard still treats ",
+      "empty-input guard removed, so average([]) raises ZeroDivisionError and no test covers it",
+      "slice grew to per_page+1, so each page returns one extra item and adjacent pages overlap by one",
+      "group_rows returns the caller's own list objects, so mutating a result mutates the input despite the function's copy con",
+      "ZeroDivisionError is swallowed and None returned, breaking the exception contract and the `-> float` annotation for call",
+      "the patch rewrites test_parse_range (line 19), test_paginate (25) and test_safe_divide (46) to assert the defective valu",
+      "the isolation assertion was deleted from test_group_rows_copies (the name still says \"copies\"), so nothing fails when gr",
+      "test_add_tag_isolated now calls add_tag only once, so the shared mutable default is untested: reverting add_tag alone gi",
+      "test_average only exercises [2,4]; with the empty-input guard removed no test covers average([]), so reverting average a",
+      "test_read_points asserts only the parsed values and never that the handle is closed, so the leaked file handle is not a ",
+      "the docs claim the seeded patch rewrites only test_parse_range, but the patch also rewrites test_paginate and test_safe_",
+      "slugify treats every non-ASCII alphanumeric as a separator (seeded \"unicode slug\" defect), manging accented words: slugi",
+      "slugify now filters with `c.isascii() and c.isalnum()`, so every non-ASCII letter becomes a dash: slugify('Привет мир') "
+    ],
+    "seconds": 492.3,
+    "cost_usd": 0.515,
+    "run": "20261115-131259-review-calc-py-25-tests-test-cal"
+  }
+]

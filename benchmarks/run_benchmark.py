@@ -18,20 +18,24 @@ BENCH = Path(r"C:\Users\AgentPC\source\repos\council-benchmark")
 AGENT_COUNCIL = Path(r"C:\Users\AgentPC\source\repos\agent-council")
 TIERS = ("lean", "standard", "full")
 RESULTS = AGENT_COUNCIL / "benchmarks" / "results.json"
+KEPT = AGENT_COUNCIL / "benchmarks" / "runs"
 
 DEFECTS = [
     {"id": "range-off-by-one", "file": "calc.py",
-     "terms": ["off-by-one", "exclusive", "hi + 1", "upper bound", "range(lo, hi)"]},
+     "terms": ["off-by-one", "exclusive", "hi + 1", "upper bound", "range(lo, hi)",
+               "half-open"]},
     {"id": "average-empty", "file": "calc.py",
      "terms": ["empty", "len(values)", "zero values", "average([])"]},
     {"id": "paginate-overlap", "file": "calc.py",
      "terms": ["overlap", "per_page", "extra item", "one extra"]},
     {"id": "group-aliasing", "file": "calc.py",
-     "terms": ["alias", "shallow", "same list", "returns rows", "caller's own"]},
+     "terms": ["alias", "shallow", "same list", "returns rows", "caller's own",
+               "instead of a copy", "corrupts the input", "mutating the result"]},
     {"id": "file-leak", "file": "calc.py",
      "terms": ["close", "leak", "file handle", "open("]},
     {"id": "mutable-default", "file": "calc.py",
-     "terms": ["mutable default", "shared default", "default argument", "tags=[]"]},
+     "terms": ["mutable default", "shared default", "default argument", "tags=[]",
+               "created once", "tags: list[str]", "persist", "accumulate"]},
     {"id": "swallowed-error", "file": "calc.py",
      "terms": ["swallow", "returns none", "silent", "safe_divide"]},
     {"id": "unicode-slug", "file": "calc.py",
@@ -73,6 +77,11 @@ def newest_run(started: float) -> Path | None:
     return max(candidates)[1] if candidates else None
 
 
+def _file_matches(finding: dict) -> bool:
+    path = str(finding.get("file", "")).replace("\\", "/").lower()
+    return path.endswith("calc.py") or path.endswith("tests/test_calc.py")
+
+
 def score(confirmed: list[dict]) -> tuple[list[str], list[str], list[str]]:
     """Match confirmed findings to seeded defects; duplicates do not inflate recall."""
     matched_ids: set[str] = set()
@@ -81,7 +90,7 @@ def score(confirmed: list[dict]) -> tuple[list[str], list[str], list[str]]:
         text = " ".join(str(finding.get(key, "")) for key in
                         ("issue", "evidence", "repro", "repro_output")).lower()
         hit = next((d for d in DEFECTS
-                    if "calc" in str(finding.get("file", ""))
+                    if _file_matches(finding)
                     and any(term.lower() in text for term in d["terms"])), None)
         if hit is not None:
             matched_ids.add(hit["id"])
@@ -120,7 +129,7 @@ def run_tier(tier: str) -> dict:
             cost += float(event["cost_usd"])
 
     matched, missed, false_blockers = score(confirmed)
-    return {
+    row = {
         "tier": tier,
         "tier_reason": meta.get("tier_reason"),
         "decision": "block" if proc.returncode == 2 else (
@@ -136,17 +145,46 @@ def run_tier(tier: str) -> dict:
         "cost_usd": round(cost, 4),
         "run": run.name if run else "",
     }
+    # The fixture's .council is wiped before the next tier; keep this run's
+    # evidence so --recompute can rescore without another model call.
+    kept = KEPT / f"{tier}-{run.name}"
+    try:
+        if kept.exists():
+            shutil.rmtree(kept)
+        shutil.copytree(run, kept)
+        row["kept"] = str(kept)
+    except OSError:
+        pass
+    return row
+
+
+def _matches_text(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(term.lower() in lowered
+               for defect in DEFECTS for term in defect["terms"])
 
 
 def recompute() -> int:
     rows = json.loads(RESULTS.read_text(encoding="utf-8"))
     for row in rows:
-        run_name = row.get("run")
-        if not run_name:
+        events = None
+        if row.get("kept"):
+            events = Path(row["kept"]) / "events.jsonl"
+        elif row.get("run"):
+            events = BENCH / ".council" / "runs" / row["run"] / "events.jsonl"
+        try:
+            text = events.read_text(encoding="utf-8") if events else ""
+        except OSError:
+            # Old runs are gone; the stored unmatched texts still let us drop
+            # duplicates of defects that were already matched.
+            row["false_blockers"] = [t for t in (row.get("false_blockers") or [])
+                                     if not _matches_text(t)]
+            print(json.dumps({k: row.get(k) for k in
+                              ("tier", "recall", "confirmed", "false_blockers")},
+                             ensure_ascii=False))
             continue
-        events = BENCH / ".council" / "runs" / run_name / "events.jsonl"
         confirmed = []
-        for line in events.read_text(encoding="utf-8").splitlines():
+        for line in text.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -159,7 +197,9 @@ def recompute() -> int:
         row["missed"] = missed
         row["confirmed"] = len(confirmed)
         row["false_blockers"] = false_blockers
-        print(json.dumps(row, ensure_ascii=False))
+        print(json.dumps({k: row.get(k) for k in
+                          ("tier", "recall", "confirmed", "false_blockers")},
+                         ensure_ascii=False))
     RESULTS.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"rescored: {RESULTS}")
     return 0

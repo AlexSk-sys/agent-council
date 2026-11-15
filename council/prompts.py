@@ -387,7 +387,8 @@ def verify_findings_prompt(agent: str, project: str, findings_text: str,
 
 LENSES = {
     "claude": ("CORRECTNESS - invalid inputs, edge cases, error paths, resource "
-               "handling, and whether the code does what it claims."),
+               "handling and shared mutable state (default arguments, aliasing), "
+               "and whether the code does what it claims."),
     "dsh": ("REGRESSION & CONTRACTS - callers, public interfaces, data formats, "
             "concurrency, and what breaks outside the changed lines."),
     "opencode": ("TESTS & DOCS - the test that would fail if the change were "

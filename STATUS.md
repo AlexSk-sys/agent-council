@@ -18,13 +18,14 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
 Every verdict carries the reviewed commit and time, and a pending verdict for an older HEAD is
 prefixed `[STALE: ...]`. `--tier` can force a tier for one run. `work` now runs verify first and
 uses verify/repro/lessons too. A seeded-defect benchmark (8 defects, fixture repo) runs lean /
-standard / full and records recall, false blockers, time and cost. 134 unit tests green.
+standard / full and records recall, false blockers, time and cost. 136 unit tests green.
 
 ## Next (max 3)
-1. Finish the seeded benchmark, record the table (recall / false blockers / time / $ per tier) and
-   tune the lenses against any missed defect.
-2. Measure the automatic-mode cost of a real day: lean consults per message, standard Stop reviews.
-3. Decide whether `work` should also review a snapshot (it currently reviews the live tree).
+1. Repeat the cold benchmark 2–3 times for variance and to validate the new correctness-lens
+   hint against the mutable-default miss.
+2. Add a ninth, subtler defect (concurrency / shared state across functions) so standard/full do
+   not saturate at 8/8.
+3. Measure the automatic-mode cost of a real day: lean consults per message, standard Stop reviews.
 
 ## Blocked
 - Nothing.
@@ -44,6 +45,29 @@ standard / full and records recall, false blockers, time and cost. 134 unit test
   CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — work hardening from its own consult: REPRO lines now run only in a disposable
+  snapshot (a `git checkout -- .` repro leaves the live tree untouched,
+  `test_work_repros_do_not_touch_the_live_tree`); verify re-runs after every executor pass and
+  the fresh output goes to reviewers (`test_work_rechecks_verify_after_execution`); work blocks
+  only on confirmed findings. Build: 136/136 OK.
+- **2026-11-15** — cold seeded benchmark (8 defects; each tier reset including `.council`;
+  de-duplicated matcher; one run per tier):
+  | tier | decision | recall | confirmed | false blockers | time | cost |
+  |---|---|---|---|---|---|---|
+  | lean | BLOCK | 7/8 | 24 | 0 | 321.9 s | $0.4152 |
+  | standard | BLOCK | 8/8 | 23 | 0 | 362.6 s | $0.4060 |
+  | full | BLOCK | 8/8 | 25 | 0 | 450.9 s | $0.3804 |
+  Lean missed the mutable-default defect; standard matched full with ~90 s less wall time;
+  full did not improve recall. Cost is not monotonic (output length dominates). One seed run per
+  tier, so no variance estimate yet. After the run, the correctness lens gained an explicit
+  "shared mutable state (default arguments, aliasing)" hint; the next run must validate it.
+  Evidence: `benchmarks/results.json`, `benchmarks/results-first-pass.json` (contaminated pass,
+  archived), full run dir kept under the fixture's `.council/runs/`.
+- **2026-11-15** — first benchmark pass (preliminary, not publishable): lean `8/8`, 269.5 s,
+  $0.4256; standard `6/8`, 452.9 s, $0.5219; full `8/8`, 492.3 s, $0.5150. The standard/full rows
+  are contaminated: the fixture's `.council` lessons from the previous tier were injected, and
+  the matcher over-counted duplicate descriptions as false blockers. Both are fixed (cold reset
+  per tier, deduplicated scoring); a clean re-run is in progress.
 - **2026-11-15** — stamps and staleness: `run.json` carries the head commit and ts; synthesis and
   pending show `(reviewed <hash> @ time)`; `_print_pending` prefixes `[STALE: ...]` when HEAD
   moved. Tests: `TestPendingStaleness`.
