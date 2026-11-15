@@ -41,6 +41,7 @@ from council.protocol import (
     parse_diff_review,
     parse_peer_reviews,
     run_session_consult,
+    run_work_loop,
 )
 from council.store import RunStore, latest_run
 from council.watch import snapshot, stop_watch, watch
@@ -747,6 +748,21 @@ class TestSessionConsult(unittest.TestCase):
                 run_session_consult(root, "hello", "digest", "x" * 2000)
             self.assertEqual(len(calls), 5)  # 3 first round + claude and opencode cross
 
+    def test_lean_keeps_the_newest_transcript_tail(self):
+        seen: list[str] = []
+
+        def fake(agent, prompt, *_args):
+            seen.append(prompt)
+            return AgentResult(agent=agent, ok=True, text="VERDICT: APPROVE")
+
+        long = "OLD_START_MARK" + "x" * 7000 + "NEWEST_MARK"
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=fake):
+                run_session_consult(Path(tmp), "hello", long)
+        self.assertTrue(seen)
+        self.assertTrue(all("NEWEST_MARK" in p for p in seen))
+        self.assertFalse(any("OLD_START_MARK" in p for p in seen))
+
     def test_unevidenced_blocker_does_not_block(self):
         texts = {"dsh": "VERDICT: BLOCK\nFINDING: blocker | | boom |"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -1219,6 +1235,32 @@ class TestProjectContext(unittest.TestCase):
                                               [{"code": 1}], "prompt")
             self.assertEqual(tier, "standard")
 
+    def test_choose_tier_untracked_only_is_standard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["big.bin"])
+            tier, reason = project_mod.choose_tier(root, "", "hello", [], "prompt")
+            self.assertEqual(tier, "standard")
+            self.assertIn("not representable", reason)
+
+    def test_apply_tier_respects_forced_docs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(
+                json.dumps({"pipeline": {"docs": True}}), encoding="utf-8")
+            lean = project_mod.apply_tier(project_mod.pipeline_options(root), "lean")
+            self.assertTrue(lean["docs"])
+
+    def test_prepare_review_honours_a_forced_tier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _prepare_review(root, project_mod.pipeline_options(root),
+                                  "prompt", "", "hello", tier_override="full")
+            self.assertEqual(ctx.tier, "full")
+            self.assertIn("forced", ctx.tier_reason)
+            self.assertTrue(ctx.options["cross"])
+
     def test_choose_tier_stop_is_standard_or_full(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1293,6 +1335,47 @@ class TestProjectContext(unittest.TestCase):
             finally:
                 snap.cleanup()
             self.assertFalse(workdir.exists())
+
+
+class TestWorkPipeline(unittest.TestCase):
+    def test_work_aborts_before_models_when_verify_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch("council.project.run_verify",
+                            return_value=[{"command": "false", "code": 1,
+                                           "output": "boom"}]), \
+                 mock.patch("council.protocol.run_agent") as agent:
+                out = run_work_loop(root, "do it")
+            agent.assert_not_called()
+            self.assertEqual(out.decision, "block")
+            self.assertEqual(out.findings[0].source, "verify")
+            self.assertEqual(out.findings[0].status, "confirmed")
+
+
+class TestPendingStaleness(unittest.TestCase):
+    def test_pending_stamp_uses_the_run_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "run.json").write_text(
+                json.dumps({"commit": "abc1234", "ts": 1700000000}), encoding="utf-8")
+            write_pending(root, "block", [], run_dir)
+            text = (root / ".council" / "pending.md").read_text(encoding="utf-8")
+            self.assertIn("reviewed abc1234", text)
+
+    def test_stale_pending_is_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "pending.md").write_text(
+                "[background council review] BLOCK: 0 confirmed "
+                "(reviewed deadbeef @ 2026-01-01 00:00)\n", encoding="utf-8")
+            buffer = io.StringIO()
+            with mock.patch("council.gitutil.head_commit", return_value="cafebabe"), \
+                 mock.patch("sys.stdout", buffer):
+                _print_pending(root)
+            self.assertIn("[STALE:", buffer.getvalue())
 
 
 if __name__ == "__main__":

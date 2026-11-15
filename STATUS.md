@@ -14,12 +14,17 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
 6. **only confirmed blocker/major findings block**; confirmed classes are appended to the lessons
    checklist. An adaptive tier (lean / standard / full) picks the stages from real signals — diff
    size, changed files, security paths, test gap, action verbs — so a conversational turn costs
-   three small calls while a risky change gets the full pipeline. 123 unit tests green.
+   three small calls while a risky change gets the full pipeline.
+Every verdict carries the reviewed commit and time, and a pending verdict for an older HEAD is
+prefixed `[STALE: ...]`. `--tier` can force a tier for one run. `work` now runs verify first and
+uses verify/repro/lessons too. A seeded-defect benchmark (8 defects, fixture repo) runs lean /
+standard / full and records recall, false blockers, time and cost. 134 unit tests green.
 
 ## Next (max 3)
-1. Run a 6–8 defect seeded benchmark and record recall / false blockers / time / $ for each tier.
+1. Finish the seeded benchmark, record the table (recall / false blockers / time / $ per tier) and
+   tune the lenses against any missed defect.
 2. Measure the automatic-mode cost of a real day: lean consults per message, standard Stop reviews.
-3. Decide whether `work` should adopt the same verify/repro/lessons stages.
+3. Decide whether `work` should also review a snapshot (it currently reviews the live tree).
 
 ## Blocked
 - Nothing.
@@ -39,6 +44,19 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
   CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — stamps and staleness: `run.json` carries the head commit and ts; synthesis and
+  pending show `(reviewed <hash> @ time)`; `_print_pending` prefixes `[STALE: ...]` when HEAD
+  moved. Tests: `TestPendingStaleness`.
+- **2026-11-15** — `work` pipeline: verify failure aborts before any model
+  (`test_work_aborts_before_models_when_verify_fails`), reviewers get verify/impact/docs/lessons,
+  REPRO lines are executed and lessons appended.
+- **2026-11-15** — tier fixes from the next consult: untracked-only changes no longer report
+  "no uncommitted change"; the lean transcript keeps the newest 6k chars; docs is a real config
+  key; `--tier` forces a tier. Tests: 134/134 OK.
+- **2026-11-15** — benchmark fixture committed at `C:\Users\AgentPC\source\repos\council-benchmark`
+  (clean baseline `79e7401`, seed patch `dc09db1`), eight defects across off-by-one, empty input,
+  page overlap, aliasing, file leak, mutable default, swallowed error, unicode slug; the seeded
+  tree passes its own 8 tests by design. Runner: `benchmarks/run_benchmark.py`.
 - **2026-11-15** — correction from the next consult: the live lean run exercised only the
   `size == 0` shortcut; the message / security-path / test-gap branches are covered by unit
   tests, not by a live standard/full run. Also fixed: lean/standard tiers used to render an empty

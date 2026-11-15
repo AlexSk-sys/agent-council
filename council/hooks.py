@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -31,6 +32,7 @@ STATE_REL = Path(".council") / "state.json"
 PENDING_REL = Path(".council") / "pending.md"
 LOCK_REL = Path(".council") / "running.json"
 INBOX_REL = Path(".council") / "inbox"
+_REVIEWED_RE = re.compile(r"reviewed ([0-9a-f]{7,40})")
 DEFAULT_COOLDOWN_S = 300
 DEFAULT_PROMPT_COOLDOWN_S = 30
 MAX_RUN_S = 1800  # verify + two model rounds can outlive one 600 s agent timeout
@@ -510,9 +512,22 @@ def _print_pending(project: Path) -> None:
         text = consumed.read_text(encoding="utf-8")
     except OSError:
         return
+    stale = ""
+    match = _REVIEWED_RE.search(text)
+    if match:
+        try:
+            from .gitutil import head_commit
+
+            current = head_commit(Path(project))
+        except Exception:
+            current = ""
+        reviewed = match.group(1)
+        if current and current not in ("no-commit", reviewed):
+            stale = (f"[STALE: this verdict reviewed {reviewed}, "
+                     f"HEAD is {current}; re-run the review]\n")
     try:
         if text.strip():
-            print(text.strip())
+            print(stale + text.strip())
     except Exception:
         # A broken stdout must not destroy a verdict no one has read: put the
         # file back under its original name and let the next turn retry.
@@ -650,6 +665,19 @@ def prompt_hook(project: Path, cooldown_s: float = DEFAULT_PROMPT_COOLDOWN_S,
     return 0
 
 
+def _run_stamp(run_dir: Path) -> str:
+    try:
+        meta = json.loads((Path(run_dir) / "run.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    commit = str(meta.get("commit") or "")
+    ts = float(meta.get("ts") or 0)
+    if not commit:
+        return ""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "unknown time"
+    return f" (reviewed {commit} @ {when})"
+
+
 def write_pending(project: Path, decision: str, findings, run_dir: Path,
                   mode: str = "review") -> None:
     from .protocol import SEVERITY_ORDER
@@ -661,7 +689,8 @@ def write_pending(project: Path, decision: str, findings, run_dir: Path,
         key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
     )
     lines = [f"[background council {mode}] {decision.upper()}: "
-             f"{len(confirmed)} confirmed, {len(findings)} finding(s) total"]
+             f"{len(confirmed)} confirmed, {len(findings)} finding(s) total"
+             f"{_run_stamp(run_dir)}"]
     for f in ranked[:6]:
         loc = f" {f.file}:{f.line}" if f.file else ""
         status = getattr(f, "status", "") or "unverified"

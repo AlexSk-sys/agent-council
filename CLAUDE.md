@@ -12,6 +12,8 @@ council doctor                              # prove all 3 harnesses answer headl
 council review --path sandbox               # cross-review a diff
 council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
 council --project <p> consult --prompt-file <f>  # three agents join a user message
+council --project <p> review --tier full    # force lean | standard | full
+py -3 benchmarks\run_benchmark.py           # seeded-defect benchmark across tiers
 ```
 
 ## Automatic mode (already wired)
@@ -94,6 +96,15 @@ new user message is queued (latest wins) and the running child drains the queue 
     size, file count, security paths, test gap and action verbs, and returns lean/standard/full;
     `apply_tier` resolves `"auto"` stage flags, while an explicit boolean in the config wins.
     The chosen tier and reason are in `run.json`. Never hard-code a tier in `protocol.py`.
+    `--tier` forces one for a single run (used by the benchmark).
+17. **Every verdict is stamped.** `run.json` carries the head `commit` and `ts`; the synthesis
+    and `pending.md` show `(reviewed <hash> @ <time>)`. When a pending verdict is printed and
+    HEAD has moved, `_print_pending` prefixes `[STALE: ...]`. Never drop the stamp - it is the
+    only defence against acting on a verdict for code that no longer exists.
+18. **`work` uses the same facts as review.** It runs verify first (failure = block before any
+    model), passes verify/impact/docs/lessons to reviewers, executes `REPRO` lines, and appends
+    confirmed blocker/major classes to the lessons file. It does not snapshot (the executor
+    writes the live tree).
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

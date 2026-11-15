@@ -170,7 +170,8 @@ def _review(project: Path, args: argparse.Namespace) -> int:
     print(f"council review: {len(agents)} agents, {len(diff)} chars of diff", file=sys.stderr)
     trigger = "stop" if getattr(args, "background", False) else "manual"
     out = run_diff_review(project, diff, stat, agents, overrides, on_done=_progress,
-                          posture=args.posture, trigger=trigger)
+                          posture=args.posture, trigger=trigger,
+                          tier_override=getattr(args, "tier", None))
 
     state = load_state(project)
     state[scope] = {"fingerprint": fp, "decision": out.decision,
@@ -230,7 +231,8 @@ def _consult(project: Path, args: argparse.Namespace) -> int:
           f"transcript {len(transcript)} chars, diff {len(diff)} chars", file=sys.stderr)
     out = run_session_consult(project, message, transcript, diff, stat, git_state,
                               agents, overrides, on_done=_progress,
-                              max_chars=args.max_chars)
+                              max_chars=args.max_chars,
+                              tier_override=getattr(args, "tier", None))
 
     if args.background:
         write_pending(project, out.decision, out.findings, out.run_dir, mode="consult")
@@ -528,6 +530,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--background", action="store_true",
                    help="write .council/pending.md for the next turn (hook mode)")
     r.add_argument("--lock-token", help="release this run's council lock on exit")
+    r.add_argument("--tier", choices=["lean", "standard", "full"],
+                   help="force a pipeline tier instead of choosing one")
     r.set_defaults(func=cmd_review)
 
     c = sub.add_parser(
@@ -542,6 +546,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--background", action="store_true",
                    help="write .council/pending.md for the next turn (hook mode)")
     c.add_argument("--lock-token", help="release this run's council lock on exit")
+    c.add_argument("--tier", choices=["lean", "standard", "full"],
+                   help="force a pipeline tier instead of choosing one")
     c.set_defaults(func=cmd_consult)
 
     h = sub.add_parser("hook", help="entry point for Claude Code hooks")

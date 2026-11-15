@@ -589,11 +589,17 @@ def _render_findings_sections(findings: list[Finding]) -> list[str]:
     return lines
 
 
+def _stamp(commit: str) -> str:
+    return f"commit `{commit or 'no-commit'}` · {time.strftime('%Y-%m-%d %H:%M')}"
+
+
 def render_diff_synthesis(
     decision: str, verdicts: dict[str, str], findings: list[Finding], diff_stat: str,
-    isolation: str = "",
+    isolation: str = "", stamp: str = "",
 ) -> str:
     lines = ["# Council review", "", f"**Changed:** {diff_stat}", ""]
+    if stamp:
+        lines += [f"**Reviewed:** {stamp}", ""]
     if isolation:
         lines += [f"**Snapshot:** {isolation}", ""]
     lines += ["## Verdict", ""]
@@ -609,10 +615,12 @@ def render_diff_synthesis(
 
 def render_consult_synthesis(
     decision: str, verdicts: dict[str, str], findings: list[Finding],
-    user_message: str, diff_stat: str, isolation: str = "",
+    user_message: str, diff_stat: str, isolation: str = "", stamp: str = "",
 ) -> str:
     first = next((ln for ln in user_message.strip().splitlines() if ln.strip()), "")
     lines = ["# Council session consult", "", f"**User message:** {first[:300]}", ""]
+    if stamp:
+        lines += [f"**Reviewed:** {stamp}", ""]
     if diff_stat:
         lines += [f"**Uncommitted:** {diff_stat}", ""]
     if isolation:
@@ -709,9 +717,14 @@ class ReviewContext:
 
 
 def _prepare_review(project: Path, base_options: dict, trigger: str,
-                    diff: str, message: str) -> ReviewContext:
+                    diff: str, message: str,
+                    tier_override: str | None = None) -> ReviewContext:
     verify_results = project_mod.run_verify(project) if base_options.get("verify") else []
-    tier, reason = project_mod.choose_tier(project, diff, message, verify_results, trigger)
+    if tier_override in ("lean", "standard", "full"):
+        tier, reason = tier_override, "forced by --tier"
+    else:
+        tier, reason = project_mod.choose_tier(project, diff, message,
+                                               verify_results, trigger)
     options = project_mod.apply_tier(base_options, tier)
     snapshot = project_mod.Snapshot(project) if options.get("isolate") else None
     workdir = snapshot.prepare() if snapshot else Path(project)
@@ -719,14 +732,12 @@ def _prepare_review(project: Path, base_options: dict, trigger: str,
     if options.get("impact"):
         paths = project_mod.changed_paths(project)
         impact = project_mod.collect_impact(project, paths)
-        if options.get("docs"):
-            docs = project_mod.collect_docs(project)
-        else:
-            docs = ("(docs were not preloaded for this tier; read README/STATUS/CLAUDE "
-                    "yourself if your lens needs them)")
     else:
         impact = ("(impact context was not preloaded for this tier; inspect callers "
                   "yourself if your lens needs them)")
+    if options.get("docs"):
+        docs = project_mod.collect_docs(project)
+    else:
         docs = ("(docs were not preloaded for this tier; read README/STATUS/CLAUDE "
                 "yourself if your lens needs them)")
     lessons = project_mod.load_lessons(project) if options.get("lessons") else ""
@@ -969,6 +980,30 @@ def run_work_loop(
     _attach_prompt_dir(review_cfgs, store)
     store.log({"event": "start", "mode": "work", "task": task, "agents": agents})
 
+    options = project_mod.pipeline_options(project)
+    verify_results = project_mod.run_verify(project) if options.get("verify") else []
+    verify_text = prompts.render_verify(verify_results)
+    impact = project_mod.collect_impact(project, project_mod.changed_paths(project))
+    docs = project_mod.collect_docs(project)
+    lessons = project_mod.load_lessons(project)
+    verify_failures: list[Finding] = []
+    for res in verify_results:
+        if res.get("code") != 0:
+            verify_failures.append(Finding(
+                severity="blocker",
+                issue=f"project verify command failed: {res.get('command', '')}",
+                evidence=(res.get("output") or "no output")[-800:],
+                source="verify", status="confirmed",
+            ))
+    if verify_failures:
+        synthesis = render_work_synthesis(task, "(not started)", {}, [],
+                                          verify_failures, "", "block")
+        store.write("synthesis.md", synthesis)
+        store.log({"event": "synthesis", "decision": "block",
+                   "reason": "verify command failed; nothing executed"})
+        return CouncilOutcome("work", "block", verify_failures, [], [], store.dir, synthesis,
+                              _short("block", "verify command failed; nothing executed"))
+
     results, proposals, reviews, decision, recommended, findings, _ = _plan_phase(
         store, project, task, agents, review_cfgs, context, on_done
     )
@@ -1021,7 +1056,9 @@ def run_work_loop(
 
         review_calls = {
             a: (prompts.review_diff_prompt(a, str(project), diff,
-                                           review_cfgs[a].posture != "read_only"),
+                                           review_cfgs[a].posture != "read_only",
+                                           verify=verify_text, impact=impact,
+                                           docs=docs, lessons=lessons),
                 str(project))
             for a in reviewers
         }
@@ -1040,8 +1077,10 @@ def run_work_loop(
             verdicts[res.agent] = verdict
             round_findings.extend(parsed)
 
+        project_mod.verify_repros(project, round_findings)
         blocking = [f for f in round_findings
-                    if f.severity in ("blocker", "major") and f.has_evidence]
+                    if f.severity in ("blocker", "major") and f.has_evidence
+                    and f.status != "refuted"]
         remaining = blocking
         store.log({"event": "round", "round": round_no, "verdicts": verdicts,
                    "blocking": [f.to_dict() for f in blocking], "diff_stat": stat})
@@ -1068,6 +1107,8 @@ def run_work_loop(
     final_diff, final_stat = collect_diff(project)
     store.write("final.patch", final_diff)
     decision_out = "approve" if not remaining else "block"
+    if options.get("lessons"):
+        project_mod.append_lessons(project, remaining, store.run_id)
     synthesis = render_work_synthesis(task, executor, proposals, changelog, remaining,
                                       final_stat, decision_out)
     store.write("synthesis.md", synthesis)
@@ -1117,20 +1158,24 @@ def run_diff_review(
     on_done=None,
     posture: str = "shell",
     trigger: str = "manual",
+    tier_override: str | None = None,
 ) -> CouncilOutcome:
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
     base_options = project_mod.pipeline_options(project)
+    commit = head_commit(project)
+    stamp = _stamp(commit)
     cfgs = _configs(agents, overrides, posture)
     store = RunStore.for_task(project, f"review-{diff_stat or 'diff'}")
     store.write("diff.patch", diff)
     _attach_prompt_dir(cfgs, store)
-    ctx = _prepare_review(project, base_options, trigger, diff, diff_stat)
+    ctx = _prepare_review(project, base_options, trigger, diff, diff_stat, tier_override)
     try:
         store.write_meta({
             "mode": "review", "diff_stat": diff_stat, "agents": agents,
             "posture": posture, "options": ctx.options,
             "tier": ctx.tier, "tier_reason": ctx.tier_reason,
+            "commit": commit, "ts": time.time(),
             "isolation": ctx.snapshot.meta if ctx.snapshot else {"isolation": "off"},
             "workdir": str(ctx.workdir),
             "verify": [r.get("command") for r in ctx.verify_results],
@@ -1165,7 +1210,7 @@ def run_diff_review(
         answered = [v for v in verdicts.values() if v]
         if len(answered) < MIN_AGENTS:
             synthesis = render_diff_synthesis("error", verdicts, findings, diff_stat,
-                                              ctx.isolation)
+                                              ctx.isolation, stamp)
             store.write("synthesis.md", synthesis)
             return CouncilOutcome("review", "error", findings, [], results, store.dir, synthesis,
                                   _short("error", "not enough agents answered"))
@@ -1174,7 +1219,7 @@ def run_diff_review(
             store, ctx, verdicts, findings, agents, cfgs, on_done)
         results = results + cross_results
         synthesis = render_diff_synthesis(decision, verdicts, findings, diff_stat,
-                                          ctx.isolation)
+                                          ctx.isolation, stamp)
         store.write("synthesis.md", synthesis)
         store.log({
             "event": "synthesis", "decision": decision, "verdicts": verdicts,
@@ -1202,6 +1247,7 @@ def run_session_consult(
     on_done=None,
     posture: str = "read_only",
     max_chars: int = 60000,
+    tier_override: str | None = None,
 ) -> CouncilOutcome:
     """All three agents join a live session the moment the user writes.
 
@@ -1212,6 +1258,8 @@ def run_session_consult(
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
     base_options = project_mod.pipeline_options(project)
+    commit = head_commit(project)
+    stamp = _stamp(commit)
     cfgs = _configs(agents, overrides, posture)
     store = RunStore.for_task(project, f"consult-{user_message.strip()}")
     store.write("session.md", user_message + "\n")
@@ -1219,13 +1267,15 @@ def run_session_consult(
     if diff:
         store.write("diff.patch", diff)
     _attach_prompt_dir(cfgs, store)
-    ctx = _prepare_review(project, base_options, "prompt", diff, user_message)
+    ctx = _prepare_review(project, base_options, "prompt", diff, user_message,
+                          tier_override)
     try:
         store.write_meta({
             "mode": "consult", "agents": agents, "posture": posture,
             "prompt_chars": len(user_message), "diff_stat": diff_stat,
             "options": ctx.options,
             "tier": ctx.tier, "tier_reason": ctx.tier_reason,
+            "commit": commit, "ts": time.time(),
             "isolation": ctx.snapshot.meta if ctx.snapshot else {"isolation": "off"},
             "workdir": str(ctx.workdir),
             "verify": [r.get("command") for r in ctx.verify_results],
@@ -1235,7 +1285,10 @@ def run_session_consult(
                    "options": ctx.options, "tier": ctx.tier,
                    "tier_reason": ctx.tier_reason, "workdir": str(ctx.workdir)})
 
-        prompt_transcript = transcript[:6000] if ctx.tier == "lean" else transcript
+        if ctx.tier == "lean" and len(transcript) > 6000:
+            prompt_transcript = "..." + transcript[-6000:]
+        else:
+            prompt_transcript = transcript
         max_findings = 3 if ctx.tier == "lean" else 6
         results = _parallel(
             {a: (prompts.consult_prompt(
@@ -1264,7 +1317,8 @@ def run_session_consult(
         answered = [v for v in verdicts.values() if v]
         if len(answered) < MIN_AGENTS:
             synthesis = render_consult_synthesis("error", verdicts, findings,
-                                                 user_message, diff_stat, ctx.isolation)
+                                                 user_message, diff_stat, ctx.isolation,
+                                                 stamp)
             store.write("synthesis.md", synthesis)
             return CouncilOutcome("consult", "error", findings, [], results, store.dir, synthesis,
                                   _short("error", "not enough agents answered"))
@@ -1273,7 +1327,7 @@ def run_session_consult(
             store, ctx, verdicts, findings, agents, cfgs, on_done)
         results = results + cross_results
         synthesis = render_consult_synthesis(decision, verdicts, findings,
-                                             user_message, diff_stat, ctx.isolation)
+                                             user_message, diff_stat, ctx.isolation, stamp)
         store.write("synthesis.md", synthesis)
         store.log({
             "event": "synthesis", "decision": decision, "verdicts": verdicts,

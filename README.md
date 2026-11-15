@@ -80,8 +80,20 @@ be forced on or off in `.council/config.json`:
 {"pipeline": {"verify": true, "cross": "auto", "isolate": true, "lessons": true, "impact": "auto"}}
 ```
 
-`cross`/`impact` accept `true`, `false` or `"auto"` (default). An explicit boolean overrides
-the tier.
+`cross`/`impact`/`docs` accept `true`, `false` or `"auto"` (default). An explicit boolean
+overrides the tier. Every verdict records the commit and time it reviewed; if HEAD has moved
+by the time it is shown, the pending line starts with `[STALE: ...]`. Force a tier for one run
+with `council review --tier lean|standard|full`.
+
+`council work` now runs the project verify command before planning (a failure stops it), passes
+verify/impact/docs/lessons to its reviewers, executes their `REPRO` lines and records lessons.
+
+## Benchmark
+
+`benchmarks/run_benchmark.py` resets the fixture repo at
+`C:\Users\AgentPC\source\repos\council-benchmark`, applies `seeded.patch` (eight known defects,
+all tests still green), and runs one review per tier. It reports recall, false blockers, time
+and cost to `benchmarks/results.json`.
 
 ## Always on
 

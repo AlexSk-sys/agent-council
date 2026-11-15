@@ -91,6 +91,7 @@ def pipeline_options(project: Path) -> dict:
         "isolate": raw.get("isolate") if isinstance(raw.get("isolate"), bool) else True,
         "lessons": raw.get("lessons") if isinstance(raw.get("lessons"), bool) else True,
         "impact": raw.get("impact") if isinstance(raw.get("impact"), bool) else "auto",
+        "docs": raw.get("docs") if isinstance(raw.get("docs"), bool) else "auto",
     }
 
 
@@ -120,10 +121,19 @@ def choose_tier(project: Path, diff: str, message: str,
     standard verify + impact + round 1; cross only if a major is found
     full     everything, including cross regardless of findings
     """
+    if trigger not in ("prompt", "stop"):
+        return "full", "manual or pre-commit run"
     if any(res.get("code") != 0 for res in verify_results):
         return "standard", "verify failed; round 1 still reviews, cross is deferred"
     files = changed_paths(project)
     size = len(diff.strip())
+    if size == 0 and not files:
+        return "lean", "no uncommitted change"
+    if size == 0:
+        risky_binary = len(files) > 5 or any(SECURITY_RE.search(p) for p in files)
+        return (("full", "changed files not representable in the text diff (large/binary)")
+                if risky_binary
+                else ("standard", "changed files not representable in the text diff"))
     risky = size > 8000 or len(files) > 5 or any(SECURITY_RE.search(p) for p in files)
     code_files = [p for p in files if p.lower().endswith(CODE_EXT)]
     test_gap = bool(code_files) and not any(_is_test_path(p) for p in files)
@@ -141,7 +151,7 @@ def choose_tier(project: Path, diff: str, message: str,
         if risky:
             return "full", "large or security-sensitive diff"
         return "standard", "ordinary diff"
-    return "full", "manual or pre-commit run"
+    return "standard", "ordinary prompt-time review"
 
 
 def apply_tier(options: dict, tier: str) -> dict:
@@ -162,11 +172,9 @@ def apply_tier(options: dict, tier: str) -> dict:
         if out.get("cross") == "auto":
             out["cross"] = True
     # An explicit boolean in the config wins over the tier.
-    for key in ("impact", "cross"):
+    for key in ("impact", "cross", "docs"):
         if isinstance(options.get(key), bool):
             out[key] = options[key]
-    if out.get("impact") is False:
-        out["docs"] = False
     return out
 
 
