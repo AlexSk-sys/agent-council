@@ -39,6 +39,11 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
   CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — correction from the next consult: the live lean run exercised only the
+  `size == 0` shortcut; the message / security-path / test-gap branches are covered by unit
+  tests, not by a live standard/full run. Also fixed: lean/standard tiers used to render an empty
+  docs block as "(no project docs)", a false fact; they now say the context was not preloaded and
+  the agent should read the files itself. Tests: lean/standard context assertions, 127/127 OK.
 - **2026-11-15** — adaptive tiers verified live: a clean game repo + conversational message chose
   **lean** (`no uncommitted change`), options `cross=false impact=false docs=false`, verify
   `npm test` PASS. 3/3 agents answered (dsh 27.9 s, claude 141.3 s **$0.3155**, opencode 247.3 s),

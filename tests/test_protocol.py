@@ -32,6 +32,7 @@ from council.protocol import (
     CouncilOutcome,
     Finding,
     PeerReview,
+    _prepare_review,
     decide_review,
     extract_json_objects,
     merge_diff_review,
@@ -1251,6 +1252,27 @@ class TestProjectContext(unittest.TestCase):
                 json.dumps({"pipeline": {"cross": True}}), encoding="utf-8")
             lean = project_mod.apply_tier(project_mod.pipeline_options(root), "lean")
             self.assertTrue(lean["cross"])
+
+    def test_lean_context_does_not_claim_there_are_no_docs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = _prepare_review(root, project_mod.pipeline_options(root),
+                                  "prompt", "", "hello")
+            self.assertEqual(ctx.tier, "lean")
+            self.assertIn("not preloaded", ctx.docs)
+            self.assertNotEqual(ctx.docs, "(no project docs)")
+            self.assertIn("not preloaded", ctx.impact)
+
+    def test_standard_context_preloads_impact_but_not_docs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "big.py").write_text("x = 1\n" * 400, encoding="utf-8")
+            ctx = _prepare_review(root, project_mod.pipeline_options(root),
+                                  "prompt", "x" * 2000, "hello")
+            self.assertEqual(ctx.tier, "standard")
+            self.assertIn("big.py", ctx.impact)
+            self.assertIn("not preloaded", ctx.docs)
 
     def test_snapshot_copies_the_working_tree(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -721,6 +721,14 @@ def _prepare_review(project: Path, base_options: dict, trigger: str,
         impact = project_mod.collect_impact(project, paths)
         if options.get("docs"):
             docs = project_mod.collect_docs(project)
+        else:
+            docs = ("(docs were not preloaded for this tier; read README/STATUS/CLAUDE "
+                    "yourself if your lens needs them)")
+    else:
+        impact = ("(impact context was not preloaded for this tier; inspect callers "
+                  "yourself if your lens needs them)")
+        docs = ("(docs were not preloaded for this tier; read README/STATUS/CLAUDE "
+                "yourself if your lens needs them)")
     lessons = project_mod.load_lessons(project) if options.get("lessons") else ""
     return ReviewContext(Path(project), Path(workdir), snapshot, options,
                          verify_results, impact, docs, lessons, tier, reason)
