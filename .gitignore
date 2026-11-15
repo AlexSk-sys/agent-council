@@ -1,0 +1,7 @@
+.council/runs/
+.council/latest
+sandbox/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/

@@ -1,0 +1,75 @@
+[
+  {
+    "tier": "lean",
+    "tier_reason": "forced by --tier",
+    "decision": "block",
+    "exit": 2,
+    "recall": "7/8",
+    "matched": [
+      "average-empty",
+      "file-leak",
+      "group-aliasing",
+      "paginate-overlap",
+      "range-off-by-one",
+      "swallowed-error",
+      "unicode-slug"
+    ],
+    "missed": [
+      "mutable-default"
+    ],
+    "confirmed": 24,
+    "refuted": 0,
+    "false_blockers": [],
+    "seconds": 321.9,
+    "cost_usd": 0.4152,
+    "run": "20261115-132501-review-calc-py-25-tests-test-cal"
+  },
+  {
+    "tier": "standard",
+    "tier_reason": "forced by --tier",
+    "decision": "block",
+    "exit": 2,
+    "recall": "8/8",
+    "matched": [
+      "average-empty",
+      "file-leak",
+      "group-aliasing",
+      "mutable-default",
+      "paginate-overlap",
+      "range-off-by-one",
+      "swallowed-error",
+      "unicode-slug"
+    ],
+    "missed": [],
+    "confirmed": 23,
+    "refuted": 2,
+    "false_blockers": [],
+    "seconds": 362.6,
+    "cost_usd": 0.406,
+    "run": "20261115-133023-review-calc-py-25-tests-test-cal"
+  },
+  {
+    "tier": "full",
+    "tier_reason": "forced by --tier",
+    "decision": "block",
+    "exit": 2,
+    "recall": "8/8",
+    "matched": [
+      "average-empty",
+      "file-leak",
+      "group-aliasing",
+      "mutable-default",
+      "paginate-overlap",
+      "range-off-by-one",
+      "swallowed-error",
+      "unicode-slug"
+    ],
+    "missed": [],
+    "confirmed": 25,
+    "refuted": 1,
+    "false_blockers": [],
+    "seconds": 450.9,
+    "cost_usd": 0.3804,
+    "run": "20261115-133626-review-calc-py-25-tests-test-cal"
+  }
+]
