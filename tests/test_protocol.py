@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from council import prompts
 from council import project as project_mod
+from council import win as win_mod
 from council.adapters import AgentConfig, AgentResult, _materialize_prompt
 from council.gitutil import git_summary, is_noise
 from council.cli import _collect_diff, main
@@ -1424,6 +1425,16 @@ class TestPendingStaleness(unittest.TestCase):
                  mock.patch("sys.stdout", buffer):
                 _print_pending(root)
             self.assertIn("[STALE:", buffer.getvalue())
+
+
+class TestNoWindow(unittest.TestCase):
+    def test_child_console_is_suppressed_on_windows(self):
+        import os
+
+        if os.name == "nt":
+            self.assertEqual(win_mod.kwargs()["creationflags"], 0x08000000)
+        else:
+            self.assertEqual(win_mod.kwargs(), {})
 
 
 if __name__ == "__main__":

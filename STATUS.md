@@ -18,7 +18,7 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
 Every verdict carries the reviewed commit and time, and a pending verdict for an older HEAD is
 prefixed `[STALE: ...]`. `--tier` can force a tier for one run. `work` now runs verify first and
 uses verify/repro/lessons too. A seeded-defect benchmark (8 defects, fixture repo) runs lean /
-standard / full and records recall, false blockers, time and cost. 136 unit tests green.
+standard / full and records recall, false blockers, time and cost. 137 unit tests green.
 
 ## Next (max 3)
 1. Repeat the cold benchmark 2–3 times for variance and to validate the new correctness-lens
@@ -45,6 +45,11 @@ standard / full and records recall, false blockers, time and cost. 136 unit test
   CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — console windows on every prompt fixed: all global hooks and the status line
+  now run `pythonw.exe`, and every child process in the council (`git`, `npm`, the `.cmd` agent
+  shims) uses `CREATE_NO_WINDOW` via `council/win.py`; the global hook scripts and statusline set
+  the flag inline. Hooks compile, `settings.json` parses, 137/137 tests OK. Visual confirmation
+  on the next prompt is the user's check.
 - **2026-11-15** — work hardening from its own consult: REPRO lines now run only in a disposable
   snapshot (a `git checkout -- .` repro leaves the live tree untouched,
   `test_work_repros_do_not_touch_the_live_tree`); verify re-runs after every executor pass and

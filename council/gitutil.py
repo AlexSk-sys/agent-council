@@ -5,11 +5,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from .win import kwargs as _no_window
+
 
 def git(project: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", *args], cwd=project, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
+        encoding="utf-8", errors="replace", **_no_window(),
     )
     return proc.stdout if proc.returncode == 0 else ""
 

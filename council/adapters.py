@@ -29,6 +29,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .win import kwargs as _no_window
+
 AGENTS = ("claude", "dsh", "opencode")
 
 # dsh's Windows sandbox rejects a TEMP directory inside the workspace.
@@ -132,6 +134,7 @@ def _run(args: list[str], cwd: str, timeout_s: int, env_extra: dict | None = Non
             timeout=timeout_s,
             env=env,
             stdin=subprocess.DEVNULL,
+            **_no_window(),
         )
         elapsed = int((time.monotonic() - started) * 1000)
         return proc, elapsed, ""

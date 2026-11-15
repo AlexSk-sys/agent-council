@@ -6,7 +6,7 @@ they review, and in `work` mode fix, each other's output. Single package, stdlib
 
 ## Commands
 ```powershell
-py -3 -m unittest discover -s tests -v      # verify (136 tests, no network)
+py -3 -m unittest discover -s tests -v      # verify (137 tests, no network)
 py -3 -m pip install -e .                   # installs the `council` entry point
 council doctor                              # prove all 3 harnesses answer headless
 council review --path sandbox               # cross-review a diff
@@ -105,6 +105,11 @@ new user message is queued (latest wins) and the running child drains the queue 
     model), passes verify/impact/docs/lessons to reviewers, executes `REPRO` lines, and appends
     confirmed blocker/major classes to the lessons file. It does not snapshot (the executor
     writes the live tree).
+19. **Every child process must be windowless.** The hooks and the status line run under
+    `pythonw`, but `git`, `npm` and the `.cmd` harness shims are console apps: without
+    `CREATE_NO_WINDOW` each one allocates a console and flashes a cmd window. `council/win.py`
+    provides `kwargs()`; `gitutil`, `project`, `adapters` and `hooks` use it, and the global
+    hook scripts / statusline set the flag inline. Never add a `subprocess.run` without it.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

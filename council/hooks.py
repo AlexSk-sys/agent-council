@@ -28,6 +28,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .win import kwargs as _no_window
+
 STATE_REL = Path(".council") / "state.json"
 PENDING_REL = Path(".council") / "pending.md"
 LOCK_REL = Path(".council") / "running.json"
@@ -401,6 +403,7 @@ def _repo_of(path: Path) -> Path | None:
         proc = subprocess.run(
             ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **_no_window(),
         )
     except OSError:
         return None

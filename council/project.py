@@ -17,6 +17,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from .win import kwargs as _no_window
+
 VERIFY_TIMEOUT_S = 300
 REPRO_TIMEOUT_S = 120
 MAX_VERIFY_OUTPUT = 6000
@@ -40,7 +42,7 @@ def _git(project: Path, *args: str) -> str:
         proc = subprocess.run(
             ["git", "-C", str(project), *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=30,
+            timeout=30, **_no_window(),
         )
         return proc.stdout if proc.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
@@ -52,7 +54,7 @@ def run_command(command: str, cwd: Path, timeout_s: int = VERIFY_TIMEOUT_S) -> d
         proc = subprocess.run(
             command, cwd=str(cwd), shell=True, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout_s,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, **_no_window(),
         )
         output = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
         return {"command": command, "code": proc.returncode,
@@ -397,7 +399,8 @@ class Snapshot:
             pass
         proc = subprocess.run(
             ["git", "-C", str(project), "worktree", "add", "--detach", str(tmp), head],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120, **_no_window(),
         )
         if proc.returncode != 0:
             self.meta = {"isolation": "none",
@@ -425,11 +428,13 @@ class Snapshot:
             return
         subprocess.run(
             ["git", "-C", str(self.project), "worktree", "remove", "--force", str(self.dir)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, **_no_window(),
         )
         subprocess.run(
             ["git", "-C", str(self.project), "worktree", "prune"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, **_no_window(),
         )
         if self.dir.exists():
             shutil.rmtree(self.dir, ignore_errors=True)
