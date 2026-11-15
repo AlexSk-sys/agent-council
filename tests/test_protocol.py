@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1435,6 +1436,36 @@ class TestNoWindow(unittest.TestCase):
             self.assertEqual(win_mod.kwargs()["creationflags"], 0x08000000)
         else:
             self.assertEqual(win_mod.kwargs(), {})
+
+
+class TestNoWindowCoverage(unittest.TestCase):
+    """A helper nobody calls protects nothing.
+
+    The earlier suite pinned ``win.kwargs()`` in isolation, so every real call
+    site could lose ``**_no_window()`` and stay green. This walks the package
+    and fails on any subprocess call that neither passes the helper nor carries
+    the explicit ``# detached:`` marker (DETACHED_PROCESS already has no
+    console).
+    """
+
+    def test_every_subprocess_call_suppresses_the_console(self):
+        package = Path(__file__).resolve().parents[1] / "council"
+        offenders = []
+        for path in sorted(package.glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(r"subprocess\.(?:run|Popen)\(", text):
+                body = text[match.start():match.start() + 900]
+                if "**_no_window()" in body:
+                    continue
+                before = text[:match.start()].splitlines()[-3:]
+                if any("# detached:" in line for line in before):
+                    continue
+                line_no = text[:match.start()].count("\n") + 1
+                offenders.append(f"{path.name}:{line_no}")
+        self.assertEqual(
+            offenders, [],
+            "subprocess calls without CREATE_NO_WINDOW: " + ", ".join(offenders),
+        )
 
 
 if __name__ == "__main__":

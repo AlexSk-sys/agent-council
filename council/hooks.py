@@ -275,6 +275,7 @@ def _spawn_detached(project: Path, args: list[str]) -> int:
         kwargs["creationflags"] = 0x00000008 | 0x00000200
     with (log_dir / "background.log").open("a", encoding="utf-8") as log:
         kwargs["stdout"] = log
+        # detached: DETACHED_PROCESS already means no console; no extra flag.
         proc = subprocess.Popen(args, **kwargs)
     return _as_pid(getattr(proc, "pid", 0))
 

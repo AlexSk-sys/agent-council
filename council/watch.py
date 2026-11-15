@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .gitutil import collect_diff
 from .hooks import PENDING_REL, fingerprint, load_state
+from .win import kwargs as _no_window
 
 
 def snapshot(project: Path) -> dict:
@@ -97,6 +98,7 @@ def spawn_watch(project: Path, interval: float, duration: float) -> int:
     }
     if os.name == "nt":
         kwargs["creationflags"] = 0x00000008 | 0x00000200
+    # detached: DETACHED_PROCESS already means no console; no extra flag.
     with log.open("a", encoding="utf-8") as fh:
         kwargs["stdout"] = fh
         proc = subprocess.Popen(args, **kwargs)
@@ -115,7 +117,8 @@ def stop_watch(project: Path) -> int:
         return 0
     try:
         subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, text=True) if os.name == "nt" else os.kill(pid, 15)
+                       capture_output=True, text=True,
+                       **_no_window()) if os.name == "nt" else os.kill(pid, 15)
     except OSError:
         pass
     pid_file.unlink(missing_ok=True)
