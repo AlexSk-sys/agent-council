@@ -110,6 +110,10 @@ new user message is queued (latest wins) and the running child drains the queue 
     `CREATE_NO_WINDOW` each one allocates a console and flashes a cmd window. `council/win.py`
     provides `kwargs()`; `gitutil`, `project`, `adapters` and `hooks` use it, and the global
     hook scripts / statusline set the flag inline. Never add a `subprocess.run` without it.
+    Plugin hooks are the same class of problem: `security-guidance` ran `bash`, `hookify` ran
+    `python3`, and `tokeneconomizer` ran a `/bin/sh` launcher on every prompt/tool. They are
+    rerouted to `pythonw` in their cache `hooks.json` (hookify uses a launcher that puts its root
+    on `sys.path`). Plugin updates can overwrite those files - re-apply if windows return.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

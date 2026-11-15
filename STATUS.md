@@ -45,6 +45,13 @@ standard / full and records recall, false blockers, time and cost. 137 unit test
   CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — console windows, second pass: the remaining flashes came from plugin hooks,
+  not the council. `security-guidance` ran `bash` on prompt/tool/stop, `hookify` ran `python3`
+  on prompt/tool/stop, and `tokeneconomizer` ran a `/bin/sh` launcher on prompt/tool/stop. All
+  three are rerouted to `pythonw` in their cache `hooks.json` (hookify uses a launcher that puts
+  the plugin root on `sys.path`); `PYTHONUTF8=1` was added globally. Running all three patched
+  hooks creates **no new conhost/cmd processes**. `security-guidance` stays enabled; only its
+  launcher changed. Plugin cache edits are not durable across plugin updates.
 - **2026-11-15** — console windows on every prompt fixed: all global hooks and the status line
   now run `pythonw.exe`, and every child process in the council (`git`, `npm`, the `.cmd` agent
   shims) uses `CREATE_NO_WINDOW` via `council/win.py`; the global hook scripts and statusline set
