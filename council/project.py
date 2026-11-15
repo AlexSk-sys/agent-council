@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -78,15 +79,95 @@ def _config(project: Path) -> dict:
 
 
 def pipeline_options(project: Path) -> dict:
-    """Defaults are all-on; a project can turn a costly stage off."""
+    """Defaults are adaptive; a project can force a stage on or off.
+
+    `cross` and `impact` default to "auto", which the tier decides. A boolean
+    in `.council/config.json` overrides the tier.
+    """
     raw = _config(project).get("pipeline") or {}
     return {
-        "verify": bool(raw.get("verify", True)),
-        "cross": bool(raw.get("cross", True)),
-        "isolate": bool(raw.get("isolate", True)),
-        "lessons": bool(raw.get("lessons", True)),
-        "impact": bool(raw.get("impact", True)),
+        "verify": raw.get("verify") if isinstance(raw.get("verify"), bool) else True,
+        "cross": raw.get("cross") if isinstance(raw.get("cross"), bool) else "auto",
+        "isolate": raw.get("isolate") if isinstance(raw.get("isolate"), bool) else True,
+        "lessons": raw.get("lessons") if isinstance(raw.get("lessons"), bool) else True,
+        "impact": raw.get("impact") if isinstance(raw.get("impact"), bool) else "auto",
     }
+
+
+CODE_EXT = (".py", ".js", ".jsx", ".ts", ".tsx", ".cs", ".go", ".rs", ".java",
+            ".rb", ".php", ".c", ".cc", ".cpp", ".h", ".hpp", ".swift")
+SECURITY_RE = re.compile(
+    r"(auth|payment|billing|secret|token|migration|deploy|credential|permission|\.env)",
+    re.I,
+)
+ACTION_RE = re.compile(
+    r"(сдела|исправ|добав|удал|перепиш|запус|разверн|мигрир|"
+    r"fix|implement|add|remove|refactor|deploy|migrate|delete|update|change)",
+    re.I,
+)
+
+
+def _is_test_path(path: str) -> bool:
+    low = path.lower()
+    return "test" in low or "spec" in low
+
+
+def choose_tier(project: Path, diff: str, message: str,
+                verify_results: list[dict], trigger: str = "manual") -> tuple[str, str]:
+    """Pick lean / standard / full from real signals, not from a fixed policy.
+
+    lean     3 small calls, no impact/docs/cross - conversational turns
+    standard verify + impact + round 1; cross only if a major is found
+    full     everything, including cross regardless of findings
+    """
+    if any(res.get("code") != 0 for res in verify_results):
+        return "standard", "verify failed; round 1 still reviews, cross is deferred"
+    files = changed_paths(project)
+    size = len(diff.strip())
+    risky = size > 8000 or len(files) > 5 or any(SECURITY_RE.search(p) for p in files)
+    code_files = [p for p in files if p.lower().endswith(CODE_EXT)]
+    test_gap = bool(code_files) and not any(_is_test_path(p) for p in files)
+    actionable = bool(ACTION_RE.search(message or ""))
+
+    if trigger == "prompt":
+        if size == 0:
+            return "lean", "no uncommitted change"
+        if risky or (actionable and test_gap):
+            return "full", "risky diff or actionable change without tests"
+        if actionable or size > 1500:
+            return "standard", "ordinary code change"
+        return "lean", "small change, conversational turn"
+    if trigger == "stop":
+        if risky:
+            return "full", "large or security-sensitive diff"
+        return "standard", "ordinary diff"
+    return "full", "manual or pre-commit run"
+
+
+def apply_tier(options: dict, tier: str) -> dict:
+    out = dict(options)
+    if tier == "lean":
+        out["impact"] = False
+        out["docs"] = False
+        if out.get("cross") == "auto":
+            out["cross"] = False
+    elif tier == "standard":
+        out["impact"] = True
+        out["docs"] = False
+        if out.get("cross") == "auto":
+            out["cross"] = "auto"
+    else:
+        out["impact"] = True
+        out["docs"] = True
+        if out.get("cross") == "auto":
+            out["cross"] = True
+    # An explicit boolean in the config wins over the tier.
+    for key in ("impact", "cross"):
+        if isinstance(options.get(key), bool):
+            out[key] = options[key]
+    if out.get("impact") is False:
+        out["docs"] = False
+    return out
 
 
 def detect_verify_commands(project: Path) -> list[str]:

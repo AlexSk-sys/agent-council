@@ -622,6 +622,10 @@ class TestConsultPrompt(unittest.TestCase):
         text = prompts.consult_prompt("dsh", "C:/p", "hi", "", "", "", False)
         self.assertIn("(no uncommitted change)", text)
 
+    def test_lean_finding_cap(self):
+        text = prompts.consult_prompt("dsh", "C:/p", "hi", "", "", "", max_findings=3)
+        self.assertIn("at most 3", text)
+
 
 class TestSessionConsult(unittest.TestCase):
     def _fake(self, texts: dict[str, str], checks: dict[str, str] | None = None):
@@ -632,6 +636,11 @@ class TestSessionConsult(unittest.TestCase):
                 text = texts.get(agent, "VERDICT: APPROVE")
             return AgentResult(agent=agent, ok=True, text=text)
         return fake
+
+    def _force_cross(self, root: Path) -> None:
+        (root / ".council").mkdir(exist_ok=True)
+        (root / ".council" / "config.json").write_text(
+            json.dumps({"pipeline": {"cross": True}}), encoding="utf-8")
 
     def test_all_three_answer_approve(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -668,9 +677,11 @@ class TestSessionConsult(unittest.TestCase):
         texts = {"dsh": "VERDICT: BLOCK\nFINDING: major | a.py:1 | boom | read a.py:1"}
         checks = {"claude": "CHECK: 0 | CONFIRM | read a.py:1"}
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._force_cross(root)
             with mock.patch("council.protocol.run_agent",
                             side_effect=self._fake(texts, checks)):
-                out = run_session_consult(Path(tmp), "hello")
+                out = run_session_consult(root, "hello")
             self.assertEqual(out.findings[0].status, "confirmed")
             self.assertEqual(out.decision, "block")
 
@@ -689,11 +700,51 @@ class TestSessionConsult(unittest.TestCase):
                         "REPRO: py -3 -c \"raise SystemExit(0)\""}
         checks = {"claude": "CHECK: 0 | CONFIRM | read a.py:1, the term is absent"}
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._force_cross(root)
             with mock.patch("council.protocol.run_agent",
                             side_effect=self._fake(texts, checks)):
-                out = run_session_consult(Path(tmp), "hello")
+                out = run_session_consult(root, "hello")
             self.assertEqual(out.findings[0].status, "confirmed")
             self.assertEqual(out.decision, "block")
+
+    def test_auto_cross_is_skipped_for_minor_only(self):
+        calls: list[str] = []
+
+        def fake(agent, _prompt, *_args):
+            calls.append(agent)
+            return AgentResult(agent=agent, ok=True,
+                               text="VERDICT: APPROVE\n"
+                                    "FINDING: minor | a.py:1 | typo | read a.py:1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "big.py").write_text("x" * 2000, encoding="utf-8")
+            with mock.patch("council.protocol.run_agent", side_effect=fake):
+                run_session_consult(root, "hello", "digest", "x" * 2000)
+            self.assertEqual(len(calls), 3)
+
+    def test_auto_cross_escalates_on_a_major(self):
+        calls: list[str] = []
+
+        def fake(agent, prompt, *_args):
+            calls.append(agent)
+            if "REFUTE" in prompt:
+                return AgentResult(agent=agent, ok=True, text="VERDICT: APPROVE")
+            if agent == "dsh":
+                return AgentResult(agent=agent, ok=True,
+                                   text="VERDICT: BLOCK\n"
+                                        "FINDING: major | a.py:1 | boom | read a.py:1")
+            return AgentResult(agent=agent, ok=True, text="VERDICT: APPROVE")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "big.py").write_text("x" * 2000, encoding="utf-8")
+            with mock.patch("council.protocol.run_agent", side_effect=fake):
+                run_session_consult(root, "hello", "digest", "x" * 2000)
+            self.assertEqual(len(calls), 5)  # 3 first round + claude and opencode cross
 
     def test_unevidenced_blocker_does_not_block(self):
         texts = {"dsh": "VERDICT: BLOCK\nFINDING: blocker | | boom |"}
@@ -1113,13 +1164,93 @@ class TestProjectContext(unittest.TestCase):
     def test_pipeline_options_defaults_and_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.assertTrue(all(project_mod.pipeline_options(root).values()))
+            defaults = project_mod.pipeline_options(root)
+            self.assertEqual(defaults["cross"], "auto")
+            self.assertEqual(defaults["impact"], "auto")
             (root / ".council").mkdir()
             (root / ".council" / "config.json").write_text(
                 json.dumps({"pipeline": {"cross": False}}), encoding="utf-8")
             opts = project_mod.pipeline_options(root)
             self.assertFalse(opts["cross"])
             self.assertTrue(opts["verify"])
+
+    def _repo_with(self, root: Path, files: list[str]) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        for name in files:
+            (root / name).write_text("x\n", encoding="utf-8")
+
+    def test_choose_tier_manual_is_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(project_mod.choose_tier(Path(tmp), "", "", [], "manual")[0],
+                             "full")
+
+    def test_choose_tier_prompt_without_diff_is_lean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(project_mod.choose_tier(Path(tmp), "", "hello", [], "prompt")[0],
+                             "lean")
+
+    def test_choose_tier_actionable_change_without_tests_is_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["game.js"])
+            tier, _ = project_mod.choose_tier(root, "x" * 100, "fix the score", [], "prompt")
+            self.assertEqual(tier, "full")
+
+    def test_choose_tier_actionable_change_with_a_test_is_standard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["game.js", "logic.test.js"])
+            tier, _ = project_mod.choose_tier(root, "x" * 100, "fix the score", [], "prompt")
+            self.assertEqual(tier, "standard")
+
+    def test_choose_tier_security_path_is_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["auth.py"])
+            tier, _ = project_mod.choose_tier(root, "x" * 100, "hello", [], "prompt")
+            self.assertEqual(tier, "full")
+
+    def test_choose_tier_verify_failure_stays_standard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["game.js"])
+            tier, _ = project_mod.choose_tier(root, "x" * 100, "fix it",
+                                              [{"code": 1}], "prompt")
+            self.assertEqual(tier, "standard")
+
+    def test_choose_tier_stop_is_standard_or_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["game.js"])
+            self.assertEqual(
+                project_mod.choose_tier(root, "x" * 100, "", [], "stop")[0], "standard")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with(root, ["auth.py"])
+            self.assertEqual(
+                project_mod.choose_tier(root, "x" * 100, "", [], "stop")[0], "full")
+
+    def test_apply_tier_lean_standard_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            opts = project_mod.pipeline_options(Path(tmp))
+            lean = project_mod.apply_tier(opts, "lean")
+            self.assertFalse(lean["impact"])
+            self.assertFalse(lean["cross"])
+            standard = project_mod.apply_tier(opts, "standard")
+            self.assertTrue(standard["impact"])
+            self.assertEqual(standard["cross"], "auto")
+            full = project_mod.apply_tier(opts, "full")
+            self.assertTrue(full["cross"])
+            self.assertTrue(full["docs"])
+
+    def test_apply_tier_respects_forced_cross(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(
+                json.dumps({"pipeline": {"cross": True}}), encoding="utf-8")
+            lean = project_mod.apply_tier(project_mod.pipeline_options(root), "lean")
+            self.assertTrue(lean["cross"])
 
     def test_snapshot_copies_the_working_tree(self):
         with tempfile.TemporaryDirectory() as tmp:

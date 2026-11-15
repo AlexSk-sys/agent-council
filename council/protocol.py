@@ -691,6 +691,8 @@ class ReviewContext:
     impact: str
     docs: str
     lessons: str
+    tier: str = "standard"
+    tier_reason: str = ""
 
     @property
     def verify_text(self) -> str:
@@ -706,16 +708,22 @@ class ReviewContext:
         return f"none ({meta.get('reason', 'unavailable')})"
 
 
-def _prepare_review(project: Path, options: dict) -> ReviewContext:
+def _prepare_review(project: Path, base_options: dict, trigger: str,
+                    diff: str, message: str) -> ReviewContext:
+    verify_results = project_mod.run_verify(project) if base_options.get("verify") else []
+    tier, reason = project_mod.choose_tier(project, diff, message, verify_results, trigger)
+    options = project_mod.apply_tier(base_options, tier)
     snapshot = project_mod.Snapshot(project) if options.get("isolate") else None
     workdir = snapshot.prepare() if snapshot else Path(project)
-    verify_results = project_mod.run_verify(project) if options.get("verify") else []
-    paths = project_mod.changed_paths(project)
-    impact = project_mod.collect_impact(project, paths) if options.get("impact") else ""
-    docs = project_mod.collect_docs(project) if options.get("impact") else ""
+    impact = docs = ""
+    if options.get("impact"):
+        paths = project_mod.changed_paths(project)
+        impact = project_mod.collect_impact(project, paths)
+        if options.get("docs"):
+            docs = project_mod.collect_docs(project)
     lessons = project_mod.load_lessons(project) if options.get("lessons") else ""
     return ReviewContext(Path(project), Path(workdir), snapshot, options,
-                         verify_results, impact, docs, lessons)
+                         verify_results, impact, docs, lessons, tier, reason)
 
 
 def _verify_failures(ctx: ReviewContext) -> list[Finding]:
@@ -733,10 +741,21 @@ def _verify_failures(ctx: ReviewContext) -> list[Finding]:
     return out
 
 
+def _should_cross(ctx: ReviewContext, findings: list[Finding]) -> bool:
+    mode = ctx.options.get("cross")
+    if mode is False:
+        return False
+    if mode is True:
+        return True
+    # auto: pay for the second round only when something serious was raised
+    return any(f.severity in ("blocker", "major") and f.status != "refuted"
+               for f in findings)
+
+
 def _cross_round(store, ctx: ReviewContext, agents: list[str],
                  cfgs: dict[str, AgentConfig], findings: list[Finding],
                  on_done) -> list[AgentResult]:
-    if not ctx.options.get("cross"):
+    if not _should_cross(ctx, findings):
         return []
     numbered = [(i, f) for i, f in enumerate(findings)
                 if f.has_evidence and f.source != "verify"][:8]
@@ -1089,25 +1108,28 @@ def run_diff_review(
     overrides: dict[str, dict] | None = None,
     on_done=None,
     posture: str = "shell",
+    trigger: str = "manual",
 ) -> CouncilOutcome:
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
-    options = project_mod.pipeline_options(project)
+    base_options = project_mod.pipeline_options(project)
     cfgs = _configs(agents, overrides, posture)
     store = RunStore.for_task(project, f"review-{diff_stat or 'diff'}")
     store.write("diff.patch", diff)
     _attach_prompt_dir(cfgs, store)
-    ctx = _prepare_review(project, options)
+    ctx = _prepare_review(project, base_options, trigger, diff, diff_stat)
     try:
         store.write_meta({
             "mode": "review", "diff_stat": diff_stat, "agents": agents,
-            "posture": posture, "options": options,
+            "posture": posture, "options": ctx.options,
+            "tier": ctx.tier, "tier_reason": ctx.tier_reason,
             "isolation": ctx.snapshot.meta if ctx.snapshot else {"isolation": "off"},
             "workdir": str(ctx.workdir),
             "verify": [r.get("command") for r in ctx.verify_results],
         })
         store.log({"event": "start", "mode": "review", "diff_stat": diff_stat,
-                   "agents": agents, "posture": posture, "options": options,
+                   "agents": agents, "posture": posture, "options": ctx.options,
+                   "tier": ctx.tier, "tier_reason": ctx.tier_reason,
                    "workdir": str(ctx.workdir)})
 
         results = _parallel(
@@ -1181,7 +1203,7 @@ def run_session_consult(
     """
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
-    options = project_mod.pipeline_options(project)
+    base_options = project_mod.pipeline_options(project)
     cfgs = _configs(agents, overrides, posture)
     store = RunStore.for_task(project, f"consult-{user_message.strip()}")
     store.write("session.md", user_message + "\n")
@@ -1189,26 +1211,31 @@ def run_session_consult(
     if diff:
         store.write("diff.patch", diff)
     _attach_prompt_dir(cfgs, store)
-    ctx = _prepare_review(project, options)
+    ctx = _prepare_review(project, base_options, "prompt", diff, user_message)
     try:
         store.write_meta({
             "mode": "consult", "agents": agents, "posture": posture,
             "prompt_chars": len(user_message), "diff_stat": diff_stat,
-            "options": options,
+            "options": ctx.options,
+            "tier": ctx.tier, "tier_reason": ctx.tier_reason,
             "isolation": ctx.snapshot.meta if ctx.snapshot else {"isolation": "off"},
             "workdir": str(ctx.workdir),
             "verify": [r.get("command") for r in ctx.verify_results],
         })
         store.log({"event": "start", "mode": "consult", "agents": agents,
                    "prompt_chars": len(user_message), "diff_chars": len(diff),
-                   "options": options, "workdir": str(ctx.workdir)})
+                   "options": ctx.options, "tier": ctx.tier,
+                   "tier_reason": ctx.tier_reason, "workdir": str(ctx.workdir)})
 
+        prompt_transcript = transcript[:6000] if ctx.tier == "lean" else transcript
+        max_findings = 3 if ctx.tier == "lean" else 6
         results = _parallel(
             {a: (prompts.consult_prompt(
-                    a, str(ctx.workdir), user_message, transcript, git_state, diff,
+                    a, str(ctx.workdir), user_message, prompt_transcript, git_state, diff,
                     cfgs[a].posture != "read_only", max_chars,
                     lens=prompts.lens_for(a), verify=ctx.verify_text,
-                    impact=ctx.impact, docs=ctx.docs, lessons=ctx.lessons),
+                    impact=ctx.impact, docs=ctx.docs, lessons=ctx.lessons,
+                    max_findings=max_findings),
                  str(ctx.workdir)) for a in agents},
             cfgs,
             on_done=on_done,

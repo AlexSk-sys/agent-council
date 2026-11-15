@@ -199,7 +199,7 @@ FINDING: <blocker|major|minor> | <file>:<line> | <one-line issue> | <evidence>
 REPRO: <one-line command, optional, for the FINDING above>
 
 Rules:
-- One FINDING line per defect, most severe first, at most 6.
+- One FINDING line per defect, most severe first, at most {max_findings}.
 - BLOCK only if a blocker exists, otherwise APPROVE.
 - Evidence must be a file:line you read or code you quoted. A finding with no
   evidence is invalid - leave it out.
@@ -362,7 +362,7 @@ def consult_prompt(agent: str, project: str, message: str, transcript: str,
                    git_state: str, diff: str, allow_shell: bool = False,
                    max_chars: int = 60000, lens: str | None = None,
                    verify: str = "", impact: str = "", docs: str = "",
-                   lessons: str = "") -> str:
+                   lessons: str = "", max_findings: int = 6) -> str:
     trimmed = diff if len(diff) <= max_chars else diff[:max_chars] + "\n... [diff truncated]"
     return CONSULT.format(
         message=message.strip()[:8000],
@@ -370,6 +370,7 @@ def consult_prompt(agent: str, project: str, message: str, transcript: str,
         git_state=git_state or "(unknown)",
         diff=trimmed.strip() or "(no uncommitted change)",
         lens=lens or lens_for(agent),
+        max_findings=max_findings,
         **_context_blocks(verify, impact, docs, lessons),
         **_header(agent, project, allow_shell),
     )

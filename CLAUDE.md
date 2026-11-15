@@ -90,6 +90,10 @@ new user message is queued (latest wins) and the running child drains the queue 
     otherwise one agent's unproven assertion can block any change.
 15. **Lessons are deduped and never include verify failures.** `.council/checklist.md` is a list
     of confirmed failure classes, injected into later prompts. A flaky test run is not a class.
+16. **Tiers are chosen from signals, not from a fixed policy.** `project.choose_tier` reads diff
+    size, file count, security paths, test gap and action verbs, and returns lean/standard/full;
+    `apply_tier` resolves `"auto"` stage flags, while an explicit boolean in the config wins.
+    The chosen tier and reason are in `run.json`. Never hard-code a tier in `protocol.py`.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

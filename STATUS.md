@@ -12,12 +12,13 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
    non-zero confirms, zero refutes;
 5. a cross-examination round lets each agent confirm/refute the others' findings and add new ones;
 6. **only confirmed blocker/major findings block**; confirmed classes are appended to the lessons
-   checklist. 111 unit tests green. Live E2E on the game repo is running (see Verified when done).
+   checklist. An adaptive tier (lean / standard / full) picks the stages from real signals — diff
+   size, changed files, security paths, test gap, action verbs — so a conversational turn costs
+   three small calls while a risky change gets the full pipeline. 123 unit tests green.
 
 ## Next (max 3)
-1. Finish the live E2E of the full pipeline on the game repo and record the verdict/findings here.
-2. Measure the pipeline on the seeded-bug benchmark: recall, false blockers, time, $ (this is the
-   before/after evidence for the quality claim).
+1. Run a 6–8 defect seeded benchmark and record recall / false blockers / time / $ for each tier.
+2. Measure the automatic-mode cost of a real day: lean consults per message, standard Stop reviews.
 3. Decide whether `work` should adopt the same verify/repro/lessons stages.
 
 ## Blocked
@@ -38,6 +39,13 @@ Prompt-time council with a quality pipeline shared by `review` and `consult`:
   CHECK, or the verify command confirms it.
 
 ## Verified (dated evidence)
+- **2026-11-15** — adaptive tiers verified live: a clean game repo + conversational message chose
+  **lean** (`no uncommitted change`), options `cross=false impact=false docs=false`, verify
+  `npm test` PASS. 3/3 agents answered (dsh 27.9 s, claude 141.3 s **$0.3155**, opencode 247.3 s),
+  no cross round, verdict `APPROVE: 1 confirmed, 9 finding(s)`; cost $0.3155 vs $0.7463 for the
+  full review, so the automatic path is ~58% cheaper on this pair. The lean run found a real minor
+  in the game (score credited after a mid-frame game over) and an untested `trigger == "stop"`
+  tier branch; both fixed with tests (game 14/14, council 125/125).
 - **2026-11-15** — full pipeline E2E on the game repo with a seeded defect (a combo-bonus
   scoring change shipped without a test): verify `npm test` **PASS** (13 tests) → snapshot
   worktree with 1 copied file → round 1 (claude 104.0 s $0.2461, dsh 150.0 s, opencode 85.3 s)

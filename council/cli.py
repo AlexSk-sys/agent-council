@@ -168,8 +168,9 @@ def _review(project: Path, args: argparse.Namespace) -> int:
             return 0 if last["decision"] == "approve" else 2
 
     print(f"council review: {len(agents)} agents, {len(diff)} chars of diff", file=sys.stderr)
+    trigger = "stop" if getattr(args, "background", False) else "manual"
     out = run_diff_review(project, diff, stat, agents, overrides, on_done=_progress,
-                          posture=args.posture)
+                          posture=args.posture, trigger=trigger)
 
     state = load_state(project)
     state[scope] = {"fingerprint": fp, "decision": out.decision,
@@ -400,8 +401,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         cfg_path.write_text(json.dumps({
             "agents": list(AGENTS),
             "review": {"max_chars": 60000},
-            "pipeline": {"verify": True, "cross": True, "isolate": True,
-                         "lessons": True, "impact": True},
+            "pipeline": {"verify": True, "cross": "auto", "isolate": True,
+                         "lessons": True, "impact": "auto"},
             "verify": [],
             "overrides": {
                 "claude": {"timeout_s": 600},

@@ -59,11 +59,29 @@ Round 2 is cross-examination: each agent is shown the others' findings and must
 
 Exit is hard: any **confirmed** blocker/major blocks; otherwise a majority of block votes blocks;
 otherwise approve. Confirmed blocker/major classes are appended to `.council/checklist.md` and
-injected into later prompts. Every stage can be switched off in `.council/config.json`:
+injected into later prompts.
+
+### Adaptive tiers
+
+The automatic paths do not always pay for the full pipeline. `choose_tier` reads real signals
+(diff size, changed files, security-sensitive paths, test gap, action verbs in the user message)
+and picks:
+
+| tier | when | what runs |
+|---|---|---|
+| **lean** | prompt-time, clean or tiny diff, conversational message | verify + round 1; no impact/docs/cross |
+| **standard** | ordinary diff; Stop review | verify + impact + round 1; cross **only if a major is raised** |
+| **full** | manual/pre-commit, large or security-sensitive diff, actionable change without tests | everything |
+
+The chosen tier and its reason are recorded in `run.json` and `events.jsonl`. Every stage can still
+be forced on or off in `.council/config.json`:
 
 ```json
-{"pipeline": {"verify": true, "cross": true, "isolate": true, "lessons": true, "impact": true}}
+{"pipeline": {"verify": true, "cross": "auto", "isolate": true, "lessons": true, "impact": "auto"}}
 ```
+
+`cross`/`impact` accept `true`, `false` or `"auto"` (default). An explicit boolean overrides
+the tier.
 
 ## Always on
 
