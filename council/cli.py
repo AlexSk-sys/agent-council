@@ -1,4 +1,4 @@
-"""Command line entry point: `council <command>`."""
+﻿"""Command line entry point: `council <command>`."""
 
 from __future__ import annotations
 
@@ -521,7 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--diff", metavar="REF", help="review changes against a git ref")
     r.add_argument("--path", help="limit review to a path")
     r.add_argument("--agents", help="comma-separated subset")
-    r.add_argument("--max-chars", type=int, default=60000)
+    r.add_argument("--max-chars", type=int, default=30000)
     r.add_argument("--json", action="store_true")
     r.add_argument("--posture", choices=POSTURES, default="shell",
                    help="read_only | shell (run commands, no edits) | autonomous (full)")
@@ -541,7 +541,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--prompt-file", required=True, help="file with the user's message")
     c.add_argument("--transcript", help="session transcript for the context digest")
     c.add_argument("--agents", help="comma-separated subset: claude,dsh,opencode")
-    c.add_argument("--max-chars", type=int, default=60000)
+    c.add_argument("--max-chars", type=int, default=30000)
     c.add_argument("--json", action="store_true")
     c.add_argument("--background", action="store_true",
                    help="write .council/pending.md for the next turn (hook mode)")
@@ -593,3 +593,4 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ncouncil: interrupted", file=sys.stderr)
         return 130
+

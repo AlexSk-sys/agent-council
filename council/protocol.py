@@ -673,7 +673,7 @@ def _configs(agents: list[str], overrides: dict[str, dict] | None,
             chosen = "shell"
         out[name] = AgentConfig(
             name=name,
-            timeout_s=int(raw.get("timeout_s", 1200)),
+            timeout_s=int(raw.get("timeout_s", 420)),
             model=raw.get("model"),
             extra_args=list(raw.get("extra_args") or []),
             enabled=bool(raw.get("enabled", True)),
@@ -864,7 +864,7 @@ def decide_review(verdicts: dict[str, str], findings: list[Finding]) -> str:
     """A proven blocker/major blocks; otherwise a majority of block votes does."""
     if any(f.blocks for f in findings):
         return "block"
-    answered = [v for v in verdicts.values() if v]
+    answered = [v for v in verdicts.values() if v in ("approve", "block")]
     if answered and sum(1 for v in answered if v == "block") * 2 > len(answered):
         return "block"
     return "approve"
@@ -888,6 +888,48 @@ def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
         "lessons_added": added,
     })
     return cross_results, decision, added
+
+
+def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
+                verdicts: dict[str, str], findings: list[Finding], *,
+                user_message: str = "", diff: str = "", mode: str = "review",
+                on_done=None) -> list[AgentResult]:
+    """One cheap retry for agents the full prompt timed out.
+
+    A 150 KB prompt with whole changed files, docs and lessons is what pushes a
+    slow harness past its timeout. The retry sends the message and a shortened
+    diff only, at 240 s, so a third voice comes back instead of being lost.
+    """
+    failed = [a for a in agents if verdicts.get(a) not in ("approve", "block")]
+    if not failed:
+        return []
+    lean_cfgs = {a: AgentConfig(name=a, timeout_s=240, posture=cfgs[a].posture)
+                 for a in failed}
+    diff_cut = (diff or "")[:15000]
+    calls: dict[str, tuple[str, str]] = {}
+    for a in failed:
+        can_write = cfgs[a].posture != "read_only"
+        if mode == "consult":
+            calls[a] = (prompts.consult_prompt(
+                a, str(ctx.workdir), user_message, "", "", diff_cut, can_write,
+                15000, lens=prompts.lens_for(a), verify="", impact="",
+                docs="", lessons="", max_findings=3), str(ctx.workdir))
+        else:
+            calls[a] = (prompts.review_diff_prompt(
+                a, str(ctx.workdir), diff_cut, can_write,
+                lens=prompts.lens_for(a), verify="", impact="", docs="",
+                lessons=""), str(ctx.workdir))
+    results = _parallel(calls, lean_cfgs, on_done)
+    for res in results:
+        store.write(f"r1/{res.agent}-lean.raw.md", res.text or f"ERROR: {res.error}\n")
+        store.log({"event": "lean_retry", **res.to_dict()})
+        if not res.ok:
+            verdicts[res.agent] = _failure_verdict(res)
+            continue
+        verdict, parsed = parse_diff_review(res.agent, res.text)
+        verdicts[res.agent] = verdict
+        findings.extend(parsed)
+    return results
 
 
 def _plan_phase(
@@ -1258,6 +1300,11 @@ def run_diff_review(
 
         answered = [v for v in verdicts.values() if v in ("approve", "block")]
         if len(answered) < MIN_AGENTS:
+            results = results + _lean_retry(store, ctx, agents, cfgs, verdicts,
+                                            findings, diff=diff, mode="review",
+                                            on_done=on_done)
+            answered = [v for v in verdicts.values() if v in ("approve", "block")]
+        if len(answered) < MIN_AGENTS:
             synthesis = render_diff_synthesis("error", verdicts, findings, diff_stat,
                                               ctx.isolation, stamp)
             store.write("synthesis.md", synthesis)
@@ -1364,6 +1411,11 @@ def run_session_consult(
             findings.extend(parsed)
 
         answered = [v for v in verdicts.values() if v in ("approve", "block")]
+        if len(answered) < MIN_AGENTS:
+            results = results + _lean_retry(store, ctx, agents, cfgs, verdicts,
+                                            findings, user_message=user_message,
+                                            diff=diff, mode="consult", on_done=on_done)
+            answered = [v for v in verdicts.values() if v in ("approve", "block")]
         if len(answered) < MIN_AGENTS:
             synthesis = render_consult_synthesis("error", verdicts, findings,
                                                  user_message, diff_stat, ctx.isolation,
