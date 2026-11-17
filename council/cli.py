@@ -1,4 +1,4 @@
-﻿"""Command line entry point: `council <command>`."""
+"""Command line entry point: `council <command>`."""
 
 from __future__ import annotations
 
