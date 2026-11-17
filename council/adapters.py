@@ -73,7 +73,7 @@ class AgentConfig:
 
     name: str
     enabled: bool = True
-    timeout_s: int = 600
+    timeout_s: int = 1200
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)
     posture: str = "shell"

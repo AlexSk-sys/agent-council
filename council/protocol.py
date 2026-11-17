@@ -356,6 +356,22 @@ def parse_peer_reviews(reviewer: str, text: str, valid_peers: set[str]) -> list[
     return _parse_target_reviews(reviewer, text, valid_peers)
 
 
+def _failure_verdict(res) -> str:
+    """Why an agent has no verdict: timeout, crash, or an empty answer.
+
+    The synthesis used to print "unparsed" for every failed agent, which hid a
+    600 s timeout behind a parser complaint and made two of three voices look
+    like they were dropped by the parser.
+    """
+    err = (getattr(res, "error", "") or "").strip()
+    low = err.lower()
+    if "timeout" in low or "timed out" in low:
+        return "timeout"
+    if err:
+        return "error: " + err.splitlines()[0][:60]
+    return "empty answer"
+
+
 def parse_diff_review(reviewer: str, text: str) -> tuple[str, list[Finding]]:
     for obj in extract_json_objects(text):
         if not isinstance(obj, dict) or "verdict" not in obj:
@@ -492,8 +508,9 @@ def merge_diff_review(
     """block if anyone proved a blocker, or if a majority voted block."""
     if any(f.severity == "blocker" and f.has_evidence for f in findings):
         return "block"
-    blocks = sum(1 for v in verdicts.values() if v == "block")
-    if blocks * 2 > len(verdicts):
+    valid = [v for v in verdicts.values() if v in ("approve", "block")]
+    blocks = sum(1 for v in valid if v == "block")
+    if blocks * 2 > len(valid):
         return "block"
     return "approve"
 
@@ -656,7 +673,7 @@ def _configs(agents: list[str], overrides: dict[str, dict] | None,
             chosen = "shell"
         out[name] = AgentConfig(
             name=name,
-            timeout_s=int(raw.get("timeout_s", 600)),
+            timeout_s=int(raw.get("timeout_s", 1200)),
             model=raw.get("model"),
             extra_args=list(raw.get("extra_args") or []),
             enabled=bool(raw.get("enabled", True)),
@@ -1105,7 +1122,7 @@ def run_work_loop(
             store.write(f"r4/{res.agent}-{round_no}.raw.md", res.text or f"ERROR: {res.error}\n")
             store.log({"event": "diff_review", "round": round_no, **res.to_dict()})
             if not res.ok:
-                verdicts[res.agent] = ""
+                verdicts[res.agent] = _failure_verdict(res)
                 continue
             verdict, parsed = parse_diff_review(res.agent, res.text)
             verdicts[res.agent] = verdict
@@ -1233,13 +1250,13 @@ def run_diff_review(
             store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
             store.log({"event": "diff_review", **res.to_dict()})
             if not res.ok:
-                verdicts[res.agent] = ""
+                verdicts[res.agent] = _failure_verdict(res)
                 continue
             verdict, parsed = parse_diff_review(res.agent, res.text)
             verdicts[res.agent] = verdict
             findings.extend(parsed)
 
-        answered = [v for v in verdicts.values() if v]
+        answered = [v for v in verdicts.values() if v in ("approve", "block")]
         if len(answered) < MIN_AGENTS:
             synthesis = render_diff_synthesis("error", verdicts, findings, diff_stat,
                                               ctx.isolation, stamp)
@@ -1340,13 +1357,13 @@ def run_session_consult(
             store.write(f"r1/{res.agent}.raw.md", res.text or f"ERROR: {res.error}\n")
             store.log({"event": "consult", **res.to_dict()})
             if not res.ok:
-                verdicts[res.agent] = ""
+                verdicts[res.agent] = _failure_verdict(res)
                 continue
             verdict, parsed = parse_diff_review(res.agent, res.text)
             verdicts[res.agent] = verdict
             findings.extend(parsed)
 
-        answered = [v for v in verdicts.values() if v]
+        answered = [v for v in verdicts.values() if v in ("approve", "block")]
         if len(answered) < MIN_AGENTS:
             synthesis = render_consult_synthesis("error", verdicts, findings,
                                                  user_message, diff_stat, ctx.isolation,

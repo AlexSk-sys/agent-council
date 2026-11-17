@@ -37,7 +37,7 @@ INBOX_REL = Path(".council") / "inbox"
 _REVIEWED_RE = re.compile(r"reviewed ([0-9a-f]{7,40})")
 DEFAULT_COOLDOWN_S = 300
 DEFAULT_PROMPT_COOLDOWN_S = 30
-MAX_RUN_S = 1800  # verify + two model rounds can outlive one 600 s agent timeout
+MAX_RUN_S = 3600  # verify + rounds of 1200 s agent timeouts can outlive 1800 s
 
 COUNCIL_GITIGNORE = """*
 !.gitignore
@@ -150,7 +150,7 @@ def council_busy(project: Path, ttl_s: float = MAX_RUN_S) -> bool:
     A crashed child leaves its lock behind. The pid in the lock answers that
     in one cheap check; the TTL is the fallback for a lock written by a child
     that never got a pid (or by older code) and is longer than any harness
-    timeout (600 s).
+    timeout (1200 s).
     """
     path = lock_path(project)
     if not path.exists():

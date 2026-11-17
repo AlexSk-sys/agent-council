@@ -34,6 +34,7 @@ from council.protocol import (
     CouncilOutcome,
     Finding,
     PeerReview,
+    _failure_verdict,
     _prepare_review,
     _verify_repros_isolated,
     decide_review,
@@ -45,6 +46,7 @@ from council.protocol import (
     parse_peer_reviews,
     run_session_consult,
     run_work_loop,
+    render_diff_synthesis,
 )
 from council.store import RunStore, latest_run
 from council.watch import snapshot, stop_watch, watch
@@ -280,6 +282,25 @@ class TestMarkdownFallback(unittest.TestCase):
     def test_plain_prose_is_not_parsed(self):
         verdict, findings = parse_diff_review("dsh", "Looks fine to me.")
         self.assertEqual((verdict, findings), ("", []))
+
+
+class TestFailureVerdict(unittest.TestCase):
+    """A timed-out agent must read as timeout, not as a parser failure."""
+
+    def _res(self, error):
+        return AgentResult(agent="claude", ok=False, text="", error=error)
+
+    def test_timeout_label(self):
+        self.assertEqual(_failure_verdict(self._res("timeout after 600s")), "timeout")
+
+    def test_error_label_carries_reason(self):
+        self.assertTrue(_failure_verdict(self._res("boom: 403")).startswith("error:"))
+
+    def test_synthesis_prints_timeout(self):
+        text = render_diff_synthesis("approve", {"claude": "timeout", "dsh": "approve"},
+                                     [], "stat")
+        self.assertIn("| claude | timeout |", text)
+        self.assertNotIn("unparsed", text)
 
 
 class TestPeerLineFormat(unittest.TestCase):
