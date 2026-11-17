@@ -23,7 +23,7 @@ py -3 benchmarks\run_benchmark.py           # seeded-defect benchmark across tie
   to all three agents. Verdict appears in `.council/pending.md` and is printed
   into the next user turn.
 - `Stop` → `council hook --event stop` → diff review, as before.
-A shared lock (`.council/running.json`, TTL 900 s, child pid checked for liveness, O_EXCL create)
+A shared lock (`.council/running.json`, TTL 3600 s (a live child keeps it past the TTL), child pid checked for liveness, O_EXCL create)
 means only one council run per project at a time. A Stop review that arrives while a consult is
 running is **deferred, not dropped**: its diff fingerprint is stored as `review_due` and the next
 free Stop runs it. A consult is advisory and never writes the diff gate's cache (`worktree`) —
@@ -74,7 +74,7 @@ new user message is queued (latest wins) and the running child drains the queue 
     (verified with `Start-Process -RedirectStandardOutput`).
 11. **The consult hook is prompt-time, not diff-time.** It fires on every user message; the
     message is written to `.council/inbox/` and passed as a file path (newline truncation, see
-    quirk 1). If a run holds `.council/running.json` (O_EXCL create, TTL 900 s, pid checked for
+    quirk 1). If a run holds `.council/running.json` (O_EXCL create, TTL 3600 s (a live child keeps it past the TTL), pid checked for
     liveness), the message is queued (`consult_queued`, latest wins) and the running child drains
     it on exit. The 30 s cooldown applies only when no message is queued. The Stop review checks
     the same lock, so six models never run on one tree, and a review that arrives during a run is

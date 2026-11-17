@@ -1127,6 +1127,7 @@ def run_work_loop(
     remaining: list[Finding] = []
     # max_rounds fixes means max_rounds + 1 reviews: the last fix must be
     # re-reviewed, otherwise the verdict describes code that no longer exists.
+    last_verdicts: dict[str, str] = {}
     for round_no in range(max_rounds + 1):
         diff, stat = collect_diff(project)
         if not diff.strip():
@@ -1173,6 +1174,7 @@ def run_work_loop(
         _verify_repros_isolated(project, round_findings)
         blocking = [f for f in round_findings if f.blocks]
         remaining = blocking
+        last_verdicts = dict(verdicts)
         store.log({"event": "round", "round": round_no, "verdicts": verdicts,
                    "blocking": [f.to_dict() for f in blocking], "diff_stat": stat})
         if not blocking:
@@ -1197,7 +1199,12 @@ def run_work_loop(
 
     final_diff, final_stat = collect_diff(project)
     store.write("final.patch", final_diff)
-    decision_out = "approve" if not remaining else "block"
+    answered = [v for v in last_verdicts.values() if v in ("approve", "block")]
+    if last_verdicts and not answered:
+        # Every reviewer failed: silence is not approval.
+        decision_out = "error"
+    else:
+        decision_out = "approve" if not remaining else "block"
     if options.get("lessons"):
         project_mod.append_lessons(project, remaining, store.run_id)
     synthesis = render_work_synthesis(task, executor, proposals, changelog, remaining,

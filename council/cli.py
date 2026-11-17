@@ -402,14 +402,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not cfg_path.exists():
         cfg_path.write_text(json.dumps({
             "agents": list(AGENTS),
-            "review": {"max_chars": 60000},
+            "review": {"max_chars": 30000},
             "pipeline": {"verify": True, "cross": "auto", "isolate": True,
                          "lessons": True, "impact": "auto"},
             "verify": [],
             "overrides": {
-                "claude": {"timeout_s": 600},
-                "dsh": {"timeout_s": 600},
-                "opencode": {"timeout_s": 600},
+                "claude": {"timeout_s": 420},
+                "dsh": {"timeout_s": 300},
+                "opencode": {"timeout_s": 480},
             },
         }, indent=2), encoding="utf-8")
 
@@ -568,7 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("ask", help="ask one agent a single question")
     a.add_argument("--to", required=True, choices=list(AGENTS))
     a.add_argument("question")
-    a.add_argument("--timeout", type=int, default=600)
+    a.add_argument("--timeout", type=int, default=420)
     a.add_argument("--posture", choices=POSTURES, default="shell",
                    help="read_only | shell | autonomous")
     a.set_defaults(func=cmd_ask)

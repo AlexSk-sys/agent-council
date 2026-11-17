@@ -165,14 +165,19 @@ def council_busy(project: Path, ttl_s: float = MAX_RUN_S) -> bool:
             return time.time() - path.stat().st_mtime < 10
         except OSError:
             return False
-    if time.time() - started >= ttl_s:
+    pid = _as_pid(data.get("pid"))
+    if pid:
+        # A live child owns the lock for as long as it lives, even past the
+        # TTL: unlinking it there let a second council run on the same tree
+        # while the first was still writing state and pending.md.
+        if _pid_alive(pid):
+            return True
         try:
             path.unlink()
         except OSError:
             pass
         return False
-    pid = _as_pid(data.get("pid"))
-    if pid and not _pid_alive(pid):
+    if time.time() - started >= ttl_s:
         try:
             path.unlink()
         except OSError:

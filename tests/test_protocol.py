@@ -303,6 +303,26 @@ class TestFailureVerdict(unittest.TestCase):
         self.assertNotIn("unparsed", text)
 
 
+class TestParallelism(unittest.TestCase):
+    """The wall clock must be one agent, not the sum of three."""
+
+    def test_agents_run_concurrently(self):
+        from council import protocol as protocol_mod
+
+        def fake_run(agent, prompt, cwd, cfg):
+            time.sleep(0.6)
+            return AgentResult(agent=agent, ok=True, text="VERDICT: APPROVE")
+
+        cfgs = {a: AgentConfig(name=a) for a in ("claude", "dsh", "opencode")}
+        calls = {a: ("prompt", ".") for a in cfgs}
+        started = time.monotonic()
+        with mock.patch.object(protocol_mod, "run_agent", side_effect=fake_run):
+            out = protocol_mod._parallel(calls, cfgs)
+        elapsed = time.monotonic() - started
+        self.assertEqual(len(out), 3)
+        self.assertLess(elapsed, 1.5, f"took {elapsed:.2f}s — agents ran sequentially")
+
+
 class TestPeerLineFormat(unittest.TestCase):
     def test_review_and_fix_lines(self):
         text = (

@@ -104,7 +104,7 @@ Two hooks in `~/.claude/settings.json` make the council automatic in every proje
 | `UserPromptSubmit` | `pythonw.exe` + `args: [-m, council, hook, --event, prompt]` | on every user message: prints the previous verdict once, then starts a **detached three-agent `consult`** (message + transcript tail + uncommitted diff). If a run already holds the lock, the message is queued (latest wins) and the running child starts it on exit. |
 | `Stop` | `pythonw.exe` + `args: [-m, council, hook, --event, stop]` | if the working tree changed, starts a **detached background** review. Skips a diff that was already reviewed and enforces a 300 s cooldown. |
 
-A shared lock (`.council/running.json`, TTL 900 s, dead-pid recovery, O_EXCL create) allows one
+A shared lock (`.council/running.json`, TTL 3600 s (a live child keeps it past the TTL), dead-pid recovery, O_EXCL create) allows one
 council run per project at a time, so a consult and a diff review never put six models on the same
 tree. A Stop review that arrives while a consult is running is **deferred, not dropped**
 (`review_due`), and the next free Stop runs it. A consult is advisory and never writes the diff
