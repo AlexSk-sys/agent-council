@@ -21,14 +21,30 @@ uses verify/repro/lessons too. A seeded-defect benchmark (8 defects, fixture rep
 standard / full and records recall, false blockers, time and cost. 137 unit tests green.
 
 ## Next (max 3)
-1. Repeat the cold benchmark 2–3 times for variance and to validate the new correctness-lens
-   hint against the mutable-default miss.
+1. Confirm the tool-budget prompt in a full council run (all three voices, wall clock): the
+   isolated fixture measurement is the one that counts, not the per-agent probe.
 2. Add a ninth, subtler defect (concurrency / shared state across functions) so standard/full do
    not saturate at 8/8.
 3. Measure the automatic-mode cost of a real day: lean consults per message, standard Stop reviews.
 
 ## Blocked
 - Nothing.
+
+## Verified (2026-11-18, three models)
+- **Models split across harnesses** (`adapters.DEFAULT_MODELS`): claude → `glm-5.3-flash`,
+  dsh → `deepseek-v4.1-flash` (via `--patch`), opencode → `opencode-go/qwen3.8-flash`.
+  Live trivial calls: 2.0 s / 5.2 s / 5.6 s. `council doctor` in skin-arb-app: **all three ok**
+  (1.7 s / 5.2 s / 4.6 s) and it now probes the configured model, not the harness default.
+- **The real bottleneck was not the models.** A 12 KB consult prompt sent dsh into 35 tool steps
+  (reading a 4455-line file 30 lines per call); opencode died with `ECONNRESET` at 200 s. With a
+  tool budget in the prompt ("at most 8 calls, grep, never page files over 300 lines") the same
+  task answered in **64 s** with a real evidence-backed finding.
+- **A timeout is now a real deadline**: `_run` kills the process tree (`taskkill /F /T`); a
+  300 s timeout used to return at 375 s and leave idle `node` processes behind.
+- **`_lean_retry` keeps the full config** (`dataclasses.replace`), so prompt_dir/model/extra_args
+  survive the retry; the retry prompt used to be cut at its first newline. Pinned by 2 tests.
+- 148 unit tests OK (`py -3 -m unittest discover -s tests`), including 4 model-forwarding tests
+  (claude/opencode `--model`, dsh patch + ordering + provider split).
 
 ## Known limits (by design, not defects)
 - A consult's verdict is delivered at the **next** user turn; the hook API cannot inject text into

@@ -12,12 +12,12 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import prompts
 from . import project as project_mod
-from .adapters import AGENTS, POSTURES, AgentConfig, AgentResult, run_agent
+from .adapters import AGENTS, DEFAULT_MODELS, POSTURES, AgentConfig, AgentResult, run_agent
 from .gitutil import collect_diff, head_commit
 from .store import RunStore
 
@@ -674,10 +674,11 @@ def _configs(agents: list[str], overrides: dict[str, dict] | None,
         out[name] = AgentConfig(
             name=name,
             timeout_s=int(raw.get("timeout_s", 420)),
-            model=raw.get("model"),
+            model=raw.get("model") or DEFAULT_MODELS.get(name),
             extra_args=list(raw.get("extra_args") or []),
             enabled=bool(raw.get("enabled", True)),
             posture=chosen,
+            effort=raw.get("effort"),
         )
     return out
 
@@ -903,8 +904,12 @@ def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
     failed = [a for a in agents if verdicts.get(a) not in ("approve", "block")]
     if not failed:
         return []
-    lean_cfgs = {a: AgentConfig(name=a, timeout_s=240, posture=cfgs[a].posture)
-                 for a in failed}
+    # Copy the full config and change only the timeout. Rebuilding from
+    # defaults silently dropped prompt_dir, so the multi-line retry prompt went
+    # on the .cmd shim argv and was cut at its first newline (the recovery
+    # could never deliver its prompt). It also dropped model/extra_args, which
+    # would have sent the retry to a different backend than round 1.
+    lean_cfgs = {a: replace(cfgs[a], timeout_s=240) for a in failed}
     diff_cut = (diff or "")[:15000]
     calls: dict[str, tuple[str, str]] = {}
     for a in failed:

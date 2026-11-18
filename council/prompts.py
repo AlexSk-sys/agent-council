@@ -110,6 +110,15 @@ KNOWN FAILURE CLASSES FROM EARLIER CONFIRMED FINDINGS - check these first:
 THE CHANGE:
 {diff}
 
+HOW MUCH TO LOOK AT:
+- You have a budget of at most 8 tool calls and your whole answer must arrive in time.
+- Grep for the symbol instead of reading a large file; never page through a file
+  longer than 300 lines. dsh shows ~30 lines per read, so a 4000-line file is
+  150 calls and no answer at all - measured: 300 s timeout without this budget,
+  64 s and a real finding with it.
+- An unfinished review is worthless: when the budget is spent, answer with the
+  verdict you can support from what you read.
+
 Check specifically:
 1. Does the code do what the change claims, for inputs the author probably did not
    try (empty, None, zero, negative, very large, unicode, concurrent)?
@@ -181,6 +190,15 @@ KNOWN FAILURE CLASSES FROM EARLIER CONFIRMED FINDINGS - check these first:
 
 Uncommitted change under discussion:
 {diff}
+
+HOW MUCH TO LOOK AT:
+- You have a budget of at most 8 tool calls and your whole answer must arrive in time.
+- Grep for the symbol instead of reading a large file; never page through a file
+  longer than 300 lines. dsh shows ~30 lines per read, so a 4000-line file is
+  150 calls and no answer at all - measured: 300 s timeout without this budget,
+  64 s and a real finding with it.
+- An unfinished review is worthless: when the budget is spent, answer with the
+  verdict you can support from what you read.
 
 Check specifically:
 1. What does the user actually want, and which constraint is easy to miss?

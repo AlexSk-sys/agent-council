@@ -323,6 +323,137 @@ class TestParallelism(unittest.TestCase):
         self.assertLess(elapsed, 1.5, f"took {elapsed:.2f}s — agents ran sequentially")
 
 
+class TestLeanRetry(unittest.TestCase):
+    """The recovery for a timed-out voice must deliver its prompt.
+
+    It rebuilt AgentConfig from defaults, so prompt_dir was gone and the
+    multi-line prompt went on the .cmd shim argv, which cmd.exe cuts at the
+    first newline - the retry "worked" and sent nothing. model and extra_args
+    were lost the same way, which would silently switch backends.
+    """
+
+    def _run(self, cfgs, verdicts):
+        return self._run_agents(list(cfgs), cfgs, verdicts)
+
+    def _run_agents(self, agents, cfgs, verdicts):
+        from council import adapters as adapters_mod
+        from council import protocol as protocol_mod
+
+        captured: list[tuple[list[str], int]] = []
+
+        class _Proc:
+            returncode = 0
+            stdout = json.dumps({"result": "VERDICT: APPROVE\nFINDING: none",
+                                 "is_error": False})
+            stderr = ""
+
+        def fake_run(args, cwd, timeout_s, env_extra=None):
+            captured.append((args, timeout_s))
+            return _Proc(), 5, ""
+
+        store = mock.Mock()
+        ctx = mock.Mock()
+        ctx.workdir = Path(tempfile.gettempdir())
+        findings: list[Finding] = []
+        with mock.patch.object(adapters_mod, "_run", side_effect=fake_run):
+            protocol_mod._lean_retry(
+                store, ctx, agents, cfgs, verdicts, findings,
+                user_message="hello\nworld", diff="diff\nmore", mode="consult")
+        return captured
+
+    def test_retry_keeps_prompt_dir_model_and_arrays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfgs = {"claude": AgentConfig(name="claude", prompt_dir=tmp,
+                                          model="m1", extra_args=["--x"], timeout_s=60)}
+            captured = self._run(cfgs, {"claude": "timeout"})
+            self.assertEqual(len(captured), 1, "lean retry did not call the agent")
+            args, timeout_s = captured[0]
+            self.assertEqual(timeout_s, 240)
+            self.assertIn("--model", args)
+            self.assertIn("m1", args)
+            self.assertIn("--x", args)
+            pointer = args[-1]
+            self.assertNotIn("\n", pointer, "multi-line prompt stayed on argv")
+            files = list(Path(tmp).glob("prompt-claude-*.md"))
+            self.assertEqual(len(files), 1)
+            self.assertIn(str(files[0]), pointer)
+            body = files[0].read_text(encoding="utf-8")
+            self.assertIn("hello", body)
+            self.assertIn("diff", body)
+
+    def test_only_failed_agents_are_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfgs = {a: AgentConfig(name=a, prompt_dir=tmp) for a in ("claude", "dsh")}
+            captured = self._run(cfgs, {"claude": "approve", "dsh": "timeout"})
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(len(list(Path(tmp).glob("prompt-dsh-*.md"))), 1)
+            self.assertEqual(list(Path(tmp).glob("prompt-claude-*.md")), [])
+
+
+class TestModelForwarding(unittest.TestCase):
+    """Each harness gets its own model; the wiring is silent when it breaks.
+
+    The three harnesses name models differently: claude takes a bare id,
+    opencode a `provider/model`, and dsh has no model flag at all - it needs a
+    --patch overlay, and the overlay replaces the plugin config wholesale, so
+    the provider must be written too. A dropped model does not error: the run
+    succeeds on the harness default and reports a model that never spoke.
+    """
+
+    def _args(self, runner, cfg):
+        from council import adapters as adapters_mod
+
+        seen: list[list[str]] = []
+
+        def fake_run(args, cwd, timeout_s, env_extra=None):
+            seen.append(args)
+            return None, 1, "captured"
+
+        with mock.patch.object(adapters_mod, "_run", side_effect=fake_run):
+            runner("hello", ".", cfg)
+        self.assertEqual(len(seen), 1)
+        return seen[0]
+
+    def test_claude_gets_model_and_effort(self):
+        from council.adapters import run_claude
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(run_claude, AgentConfig(name="claude", prompt_dir=tmp,
+                                                      model="glm-5.3-flash", effort="high"))
+        self.assertIn("--model", args)
+        self.assertEqual(args[args.index("--model") + 1], "glm-5.3-flash")
+        self.assertEqual(args[args.index("--effort") + 1], "high")
+
+    def test_opencode_gets_model(self):
+        from council.adapters import run_opencode
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(run_opencode, AgentConfig(
+                name="opencode", prompt_dir=tmp, model="opencode-go/qwen3.8-flash"))
+        self.assertEqual(args[args.index("--model") + 1], "opencode-go/qwen3.8-flash")
+
+    def test_dsh_gets_a_patch_before_app_options(self):
+        from council.adapters import run_dsh
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(run_dsh, AgentConfig(
+                name="dsh", prompt_dir=tmp, model="deepseek-v4.1-flash", effort="high"))
+            self.assertIn("--patch", args)
+            patch = args[args.index("--patch") + 1]
+            self.assertLess(args.index("--patch"), args.index("--permission-mode"),
+                            "the launcher stops parsing at the first app option")
+            body = Path(patch).read_text(encoding="utf-8")
+            self.assertIn("provider: opencode-go", body)
+            self.assertIn("model: deepseek-v4.1-flash", body)
+            self.assertIn("reasoningEffort: high", body)
+
+    def test_dsh_provider_prefix_is_split(self):
+        from council.adapters import run_dsh
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(run_dsh, AgentConfig(
+                name="dsh", prompt_dir=tmp, model="opencode-go/glm-5.3-flash"))
+            body = Path(args[args.index("--patch") + 1]).read_text(encoding="utf-8")
+            self.assertIn("provider: opencode-go", body)
+            self.assertIn("model: glm-5.3-flash", body)
+
+
 class TestPeerLineFormat(unittest.TestCase):
     def test_review_and_fix_lines(self):
         text = (

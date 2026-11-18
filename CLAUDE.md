@@ -45,6 +45,20 @@ new user message is queued (latest wins) and the running child drains the queue 
 - `council/cli.py` — argparse. Exit codes: 0 approve, 2 block, 1 error.
 - `sandbox/` — gitignored fixture repo for the E2E test.
 
+## Models: three harnesses, three models
+All three harnesses talk to one gateway (`opencode.ai/inference/go/anthropic`) but run different
+models, so a queue on one model cannot stall the whole council. Defaults live in
+`adapters.DEFAULT_MODELS` (verified live 2026-11-18):
+
+| harness | model | how it is passed |
+|---|---|---|
+| claude | `glm-5.3-flash` | `--model` |
+| dsh | `deepseek-v4.1-flash` | `--patch` overlay (`agent-default-model`) |
+| opencode | `opencode-go/qwen3.8-flash` | `--model provider/model` |
+
+A project overrides any of them in `.council/config.json` under `overrides.<agent>.model`
+(and `.effort`). `council doctor` prints the model it actually probed.
+
 ## Quirks that cost time (do not "simplify" these away)
 1. **Multi-line args are truncated at the first newline by `cmd.exe`.** All three CLIs are npm
    `.cmd` shims. `_materialize_prompt` writes the prompt to a file and passes a pointer. Removing
@@ -114,6 +128,21 @@ new user message is queued (latest wins) and the running child drains the queue 
     `python3`, and `tokeneconomizer` ran a `/bin/sh` launcher on every prompt/tool. They are
     rerouted to `pythonw` in their cache `hooks.json` (hookify uses a launcher that puts its root
     on `sys.path`). Plugin updates can overwrite those files - re-apply if windows return.
+
+20. **A timeout must kill the process tree.** `subprocess.run(timeout=)` kills the `.cmd` shim
+    only and then blocks on a pipe the grandchildren still hold: a 300 s timeout was measured
+    returning after 375 s and leaving idle `node` processes behind on every lost voice.
+    `adapters._run` uses Popen + `taskkill /F /T /PID` (`_kill_tree`) so the deadline is real.
+21. **The prompt carries a tool-call budget.** Without it, dsh pages a 4455-line file 30 lines
+    per read: 35 steps and no answer at 200 s. With "at most 8 tool calls, grep instead of
+    reading files over 300 lines" the same task answered in 64 s with a real finding.
+    The block lives in both prompt templates (`prompts.py`, "HOW MUCH TO LOOK AT").
+22. **dsh has no `--model` flag.** The model lives in the `agent-default-model` plugin of the
+    profile, so it is pinned with a `--patch` overlay written per call. The overlay replaces
+    that plugin's config object wholesale (not a deep merge): omitting `provider` fails the
+    run with "ValidationError: invalid config: $.provider". `--patch` is a launcher flag and
+    must come before the first app option (`--permission-mode`), or dsh exits 1 with
+    "unknown option '--patch'".
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

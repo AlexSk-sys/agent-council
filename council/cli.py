@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from . import prompts
-from .adapters import AGENTS, POSTURES, AgentConfig, run_agent
+from .adapters import AGENTS, DEFAULT_MODELS, POSTURES, AgentConfig, run_agent
 from .gitutil import collect_diff as _collect_diff
 from .hooks import (
     acquire_lock,
@@ -326,6 +326,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def cmd_ask(args: argparse.Namespace) -> int:
     project = Path(args.project or ".").resolve()
     cfg = AgentConfig(name=args.to, timeout_s=args.timeout, posture=args.posture,
+                      model=DEFAULT_MODELS.get(args.to),
                       prompt_dir=str(project / COUNCIL_DIR / "prompts"))
     print(f"council ask -> {args.to}", file=sys.stderr)
     res = run_agent(args.to, prompts.ask_prompt(args.to, str(project), args.question,
@@ -382,9 +383,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     verify_cmds = detect_verify_commands(project)
     print(f"  verify: {', '.join(verify_cmds) if verify_cmds else 'not detected'}")
     worst = 0
+    overrides = _load_overrides(project)
     for name in AGENTS:
+        raw = overrides.get(name) or {}
+        model = raw.get("model") or DEFAULT_MODELS.get(name)
         res = run_agent(name, "Reply with exactly one word: PONG",
-                        str(project), AgentConfig(name=name, timeout_s=args.timeout))
+                        str(project), AgentConfig(name=name, timeout_s=args.timeout,
+                                                  model=model,
+                                                  effort=raw.get("effort")))
+        print(f"  [{name}] model={model or '(harness default)'}", file=sys.stderr)
         _progress(res)
         if not res.ok:
             worst = 1
@@ -407,9 +414,11 @@ def cmd_init(args: argparse.Namespace) -> int:
                          "lessons": True, "impact": "auto"},
             "verify": [],
             "overrides": {
-                "claude": {"timeout_s": 420},
-                "dsh": {"timeout_s": 300},
-                "opencode": {"timeout_s": 480},
+                # Three models on three harnesses, all behind the same gateway:
+                # a queue on one model cannot stall the whole council.
+                "claude": {"timeout_s": 420, "model": DEFAULT_MODELS["claude"]},
+                "dsh": {"timeout_s": 300, "model": DEFAULT_MODELS["dsh"]},
+                "opencode": {"timeout_s": 480, "model": DEFAULT_MODELS["opencode"]},
             },
         }, indent=2), encoding="utf-8")
 

@@ -33,6 +33,24 @@ from .win import kwargs as _no_window
 
 AGENTS = ("claude", "dsh", "opencode")
 
+# One gateway (`opencode.ai/inference/go/anthropic`), three different models, so
+# a slow queue on one model cannot stall the whole council. Verified live
+# 2026-11-18 on this machine, each pinned explicitly below:
+#   claude -> glm-5.3-flash        (2.0 s trivial call)
+#   dsh    -> deepseek-v4.1-flash  (5.2 s, via a --patch overlay; the profile
+#                                   default is glm-5.3-flash at effort max)
+#   opencode -> qwen3.8-flash      (5.6 s)
+# A project's .council/config.json `model` key overrides any of these.
+DEFAULT_MODELS = {
+    "claude": "glm-5.3-flash",
+    "dsh": "deepseek-v4.1-flash",
+    "opencode": "opencode-go/qwen3.8-flash",
+}
+
+# dsh names a provider and a model separately; the rest of the id is what the
+# gateway expects after the "opencode-go/" prefix used by opencode.
+DSH_PROVIDER = "opencode-go"
+
 # dsh's Windows sandbox rejects a TEMP directory inside the workspace.
 DSH_TEMP = "C:\\dsh-tmp"
 
@@ -78,6 +96,10 @@ class AgentConfig:
     extra_args: list[str] = field(default_factory=list)
     posture: str = "shell"
     prompt_dir: str | None = None
+    # "low" | "high" | "max" where the harness supports it; None keeps the
+    # harness default. Peers do a reading-and-judging task, not a proof, so a
+    # lower effort is often 2x faster with the same verdict.
+    effort: str | None = None
 
 
 POSTURES = ("read_only", "shell", "autonomous")
@@ -118,35 +140,74 @@ def _exe(name: str) -> str:
     )
 
 
+@dataclass
+class _Finished:
+    """The few attributes the runners read from a completed subprocess."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _kill_tree(pid: int) -> None:
+    """Kill a harness and everything it spawned.
+
+    The harnesses are npm .cmd shims: cmd.exe starts node, which starts more
+    node. `subprocess.run(timeout=)` kills only the shim, then blocks reading a
+    pipe that the grandchildren still hold - a 300 s timeout was measured
+    returning after 375 s, with idle node processes left behind on every lost
+    voice. /T walks the whole tree so the timeout is a real deadline.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=20, **_no_window())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(pid), 9)
+        except OSError:
+            pass
+
+
 def _run(args: list[str], cwd: str, timeout_s: int, env_extra: dict | None = None):
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
     started = time.monotonic()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             args,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_s,
-            env=env,
             stdin=subprocess.DEVNULL,
+            env=env,
             **_no_window(),
         )
-        elapsed = int((time.monotonic() - started) * 1000)
-        return proc, elapsed, ""
-    except subprocess.TimeoutExpired as exc:
-        elapsed = int((time.monotonic() - started) * 1000)
-        return None, elapsed, f"timeout after {timeout_s}s"
     except FileNotFoundError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         return None, elapsed, f"executable not found: {exc}"
     except OSError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         return None, elapsed, f"os error: {exc}"
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+        elapsed = int((time.monotonic() - started) * 1000)
+        return _Finished(proc.returncode, out, err), elapsed, ""
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc.pid)
+        # Drain what the child already wrote; do not wait for it beyond 10 s.
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        elapsed = int((time.monotonic() - started) * 1000)
+        return None, elapsed, f"timeout after {timeout_s}s"
 
 
 # --------------------------------------------------------------------------
@@ -174,6 +235,8 @@ def run_claude(prompt: str, cwd: str, cfg: AgentConfig) -> AgentResult:
         args += ["--allowed-tools=Read,Grep,Glob"]
     if cfg.model:
         args += ["--model", cfg.model]
+    if cfg.effort:
+        args += ["--effort", cfg.effort]
     args += cfg.extra_args
     args.append(_materialize_prompt(prompt, cfg))
 
@@ -210,11 +273,48 @@ def run_claude(prompt: str, cwd: str, cfg: AgentConfig) -> AgentResult:
 # --------------------------------------------------------------------------
 
 
+def _dsh_model_patch(cfg: AgentConfig) -> str | None:
+    """Write a --patch overlay that pins dsh's model and reasoning effort.
+
+    `dsh --profile headless` has no --model flag: the model lives in the
+    profile's `agent-default-model` plugin config. A --patch overlay replaces
+    that config object wholesale (it is not a deep merge), so `provider` must
+    be written too or the plugin fails to activate with
+    "ValidationError: invalid config: $.provider".
+    """
+    if not cfg.model:
+        return None
+    provider, _, model = cfg.model.rpartition("/")
+    if not provider:
+        provider, model = DSH_PROVIDER, cfg.model
+    lines = [
+        "- id: agent-default-model",
+        "  config:",
+        f"    provider: {provider}",
+        f"    model: {model}",
+    ]
+    if cfg.effort:
+        lines.append(f"    reasoningEffort: {cfg.effort}")
+    base = Path(cfg.prompt_dir) if cfg.prompt_dir else Path(DSH_TEMP)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / f"dsh-model-{cfg.name}-{uuid.uuid4().hex[:8]}.yml"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(target)
+
+
 def run_dsh(prompt: str, cwd: str, cfg: AgentConfig) -> AgentResult:
     args = [
         _exe("dsh"),
         "--profile",
         "headless",
+    ]
+    # --patch is a launcher flag: the launcher stops parsing at the first app
+    # option, so it must come before --permission-mode or dsh reports
+    # "unknown option '--patch'" and exits 1.
+    patch = _dsh_model_patch(cfg)
+    if patch:
+        args += ["--patch", patch]
+    args += [
         "--permission-mode",
         "read-only" if cfg.posture == "read_only" else "workspace-write",
         "--approval-policy",
