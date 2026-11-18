@@ -10,6 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import drain as drain_mod
 from . import prompts
 from .adapters import AGENTS, DEFAULT_MODELS, POSTURES, AgentConfig, run_agent
 from .gitutil import collect_diff as _collect_diff
@@ -18,6 +19,7 @@ from .hooks import (
     drain_queue,
     fingerprint,
     load_state,
+    pending_is_news,
     release_lock,
     save_state,
     scope_key,
@@ -234,7 +236,8 @@ def _consult(project: Path, args: argparse.Namespace) -> int:
                               max_chars=args.max_chars,
                               tier_override=getattr(args, "tier", None))
 
-    if args.background:
+    if args.background and pending_is_news(project, out.decision, out.findings,
+                                           out.run_dir):
         write_pending(project, out.decision, out.findings, out.run_dir, mode="consult")
     state = load_state(project)
     state["consult"] = {"fingerprint": fingerprint(message), "decision": out.decision,
@@ -286,6 +289,38 @@ def _work(project: Path, args: argparse.Namespace) -> int:
             "run_dir": str(out.run_dir),
         }, indent=2))
     return out.exit_code
+
+
+def cmd_drain(args: argparse.Namespace) -> int:
+    """Close the confirmed findings of a run, proving each with its own repro."""
+    project = Path(args.project or ".").resolve()
+    token = _acquire_cli_lock(project, args, "drain")
+    if token == "":
+        return 1
+    try:
+        if args.run and args.run != "latest":
+            run_dir = Path(args.run).resolve()
+        else:
+            run_dir = latest_run(project)
+        if run_dir is None or not run_dir.is_dir():
+            print("council drain: no run directory in this project; run review or "
+                  "consult first", file=sys.stderr)
+            return 1
+        print(f"council drain: {run_dir.name} with {args.executor} "
+              f"({'dry run' if args.dry_run else 'fixing'})", file=sys.stderr)
+        report = drain_mod.run_drain(
+            project, run_dir, executor=args.executor,
+            overrides=_load_overrides(project), max_items=args.max,
+            dry_run=args.dry_run, on_done=_progress,
+        )
+        print(drain_mod.render_report(report))
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return drain_mod.exit_code(report)
+    finally:
+        if token:
+            release_lock(project, token)
+        drain_queue(project)
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
@@ -384,9 +419,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  verify: {', '.join(verify_cmds) if verify_cmds else 'not detected'}")
     worst = 0
     overrides = _load_overrides(project)
+    models: list[str] = []
     for name in AGENTS:
         raw = overrides.get(name) or {}
         model = raw.get("model") or DEFAULT_MODELS.get(name)
+        models.append(model or "")
         res = run_agent(name, "Reply with exactly one word: PONG",
                         str(project), AgentConfig(name=name, timeout_s=args.timeout,
                                                   model=model,
@@ -398,6 +435,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         elif "PONG" not in res.text.upper():
             print(f"  [{name}] answered but not PONG: {res.text[:80]!r}", file=sys.stderr)
             worst = 1
+    distinct = {m for m in models if m}
+    if len(distinct) < len(AGENTS):
+        print(f"  MODEL COLLISION: {len(distinct)} distinct model(s) for "
+              f"{len(AGENTS)} agents ({', '.join(sorted(distinct)) or 'harness defaults'}). "
+              f"Three peers on one model share the same blind spots.", file=sys.stderr)
+        worst = 1
     return worst
 
 
@@ -558,6 +601,21 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--tier", choices=["lean", "standard", "full"],
                    help="force a pipeline tier instead of choosing one")
     c.set_defaults(func=cmd_consult)
+
+    dr = sub.add_parser(
+        "drain",
+        help="fix the confirmed findings of a run; each fix is proven by its own repro",
+    )
+    dr.add_argument("--run", default="latest",
+                    help="run directory, or 'latest' (default)")
+    dr.add_argument("--executor", choices=list(AGENTS), default="claude",
+                    help="the one agent allowed to edit (default claude)")
+    dr.add_argument("--max", type=int, default=10,
+                    help="max fixes in one drain (default 10)")
+    dr.add_argument("--dry-run", action="store_true",
+                    help="report what would be fixed; no model calls, no edits")
+    dr.add_argument("--json", action="store_true")
+    dr.set_defaults(func=cmd_drain)
 
     h = sub.add_parser("hook", help="entry point for Claude Code hooks")
     h.add_argument("--event", choices=["stop", "prompt"], required=True)

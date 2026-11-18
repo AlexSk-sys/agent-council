@@ -687,22 +687,47 @@ def _run_stamp(run_dir: Path) -> str:
     return f" (reviewed {commit} @ {when})"
 
 
+def pending_is_news(project: Path, decision: str, findings, run_dir: Path) -> bool:
+    """True when a verdict tells the user something they have not been told.
+
+    An advisory consult that only re-states the existing checklist is not a
+    message: printing it on every conversational turn is what made the council
+    feel like it produced a fresh pile of errors each time.
+    """
+    if decision != "advisory":
+        return True
+    from .protocol import finding_key
+    from .project import lesson_index
+
+    known = lesson_index(project, exclude_run=run_dir.name)
+    return any(getattr(f, "status", "") == "confirmed" and finding_key(f) not in known
+               for f in findings)
+
+
 def write_pending(project: Path, decision: str, findings, run_dir: Path,
                   mode: str = "review") -> None:
-    from .protocol import SEVERITY_ORDER
+    from .protocol import SEVERITY_ORDER, finding_key
+    from .project import lesson_index
 
     confirmed = [f for f in findings if getattr(f, "status", "") == "confirmed"]
-    pool = confirmed if confirmed else [f for f in findings if f.has_evidence]
+    # A defect already on the checklist is not news. Counting it as "new" on
+    # every turn is what made the council feel like a source of fresh errors.
+    known = lesson_index(project, exclude_run=run_dir.name)
+    fresh = [f for f in confirmed if finding_key(f) not in known]
+    old = [f for f in confirmed if finding_key(f) in known]
+    pool = fresh or confirmed or [f for f in findings if f.has_evidence]
     ranked = sorted(
         pool,
         key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.source),
     )
     lines = [f"[background council {mode}] {decision.upper()}: "
-             f"{len(confirmed)} confirmed, {len(findings)} finding(s) total"
-             f"{_run_stamp(run_dir)}"]
+             f"{len(fresh)} new, {len(old)} known open, "
+             f"{len(findings)} finding(s) total{_run_stamp(run_dir)}"]
     for f in ranked[:6]:
         loc = f" {f.file}:{f.line}" if f.file else ""
         status = getattr(f, "status", "") or "unverified"
+        if finding_key(f) in known:
+            status += "/known"
         lines.append(f"- [{f.severity}/{status}]{loc} {f.issue} -- "
                      f"{f.evidence[:180]} ({f.source})")
     lines.append(f"run: {run_dir}")

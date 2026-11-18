@@ -298,6 +298,34 @@ def load_lessons(project: Path) -> str:
         return ""
 
 
+_LESSON_LOC = re.compile(r"loc:(.+?):(\d+):(?:blocker|major|minor|info)")
+_LESSON_DATE = re.compile(r"\[(\d{4}-\d{2}-\d{2})\]")
+
+
+def lesson_index(project: Path, exclude_run: str = "") -> dict[str, str]:
+    """`file:line` -> the date it entered the checklist.
+
+    Lets a report say "known open since 2026-11-15" instead of presenting an
+    old defect as a new error on every turn. `exclude_run` keeps a run from
+    recognising its own fresh findings as old.
+    """
+    path = lessons_path(project)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    index: dict[str, str] = {}
+    for line in text.splitlines():
+        if exclude_run and exclude_run in line:
+            continue
+        dated = _LESSON_DATE.search(line)
+        when = dated.group(1) if dated else "earlier"
+        for match in _LESSON_LOC.finditer(line):
+            key = match.group(1).replace("\\", "/") + ":" + match.group(2)
+            index.setdefault(key, when)
+    return index
+
+
 def append_lessons(project: Path, findings, run_id: str) -> int:
     """Record confirmed blocker/major classes once each; return how many were new."""
     path = lessons_path(project)

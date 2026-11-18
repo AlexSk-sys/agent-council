@@ -1,40 +1,47 @@
 # STATUS — agent-council
 
 ## Now
-Prompt-time council with a quality pipeline shared by `review` and `consult`:
-1. the project verify command runs first (config or ecosystem detection); a failure is a
-   **confirmed blocker** with real output;
-2. changed files are expanded with callers and recent commits; README/STATUS/CLAUDE claims and
-   `.council/checklist.md` lessons are injected;
-3. all three agents run in a **disposable git worktree snapshot**, each with its own lens
-   (correctness / regression & contracts / tests & docs);
-4. every finding may carry a `REPRO:` one-liner that the council executes in the snapshot —
-   non-zero confirms, zero refutes;
-5. a cross-examination round lets each agent confirm/refute the others' findings and add new ones;
-6. **only confirmed blocker/major findings block**; confirmed classes are appended to the lessons
-   checklist. An adaptive tier (lean / standard / full) picks the stages from real signals — diff
-   size, changed files, security paths, test gap, action verbs — so a conversational turn costs
-   three small calls while a risky change gets the full pipeline.
-Every verdict carries the reviewed commit and time, and a pending verdict for an older HEAD is
-prefixed `[STALE: ...]`. `--tier` can force a tier for one run. `work` now runs verify first and
-uses verify/repro/lessons too. A seeded-defect benchmark (8 defects, fixture repo) runs lean /
-standard / full and records recall, false blockers, time and cost. 137 unit tests green.
+One defect, one entry, and closure with proof:
+1. `finding_key` + `merge_findings` collapse `file:line` duplicates after the cross round
+   (real run: 17 findings -> 14 entries -> 9 confirmed blocker/major);
+2. findings already in `.council/checklist.md` render under **Known open**, the count reads
+   "N new, M known open", and a known defect vetoes only a diff that touches its file;
+3. a consult with **no diff** is `ADVISORY` (exit 0) and `pending_is_news` suppresses the
+   message entirely when it would only repeat the checklist — a question no longer returns as
+   a pile of "new errors"; the Stop review with a diff is still the gate;
+4. `council drain` closes confirmed findings only when their own REPRO flips non-zero -> zero
+   and the verify command stays green; a finding without a repro is `skipped`, and `skipped`
+   is not `clear` (exit 2). `--dry-run` executes the repros only;
+5. `council doctor` fails when fewer than three distinct models are configured.
+The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are unchanged.
+168 unit tests green.
 
 ## Next (max 3)
-1. Confirm the tool-budget prompt in a full council run (all three voices, wall clock): the
-   isolated fixture measurement is the one that counts, not the per-agent probe.
-2. Add a ninth, subtler defect (concurrency / shared state across functions) so standard/full do
-   not saturate at 8/8.
-3. Measure the automatic-mode cost of a real day: lean consults per message, standard Stop reviews.
+1. Drain agent-council's own backlog (`council drain --project .`): known open are
+   `adapters.py:169` (POSIX `killpg` without `start_new_session` - one timed-out voice can
+   SIGKILL the run) and opencode silently dropping `cfg.effort`.
+2. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the
+   user approves edits to the stories.
+3. Measure one day of automatic consults after the change: count `pending.md` writes - the
+   expected result is "only new confirmed findings", i.e. mostly none.
 
 ## Blocked
 - Nothing.
 
 ## Verified (dated evidence)
+- **2026-11-19 — noise cut and real closure.** Real run `20261118-233507` (yt-stories, 3 models):
+  17 raw findings -> 14 after root-cause merge -> 9 confirmed blocker/major -> 8 new + 1 known
+  open. `council drain --dry-run` on run `20261118-235542`: 7 confirmed, 5 "would fix", 2
+  "skipped: no repro". Live drain on the `sandbox/drain-e2e` fixture with `glm-5.3-flash`:
+  `repro_before=1 -> repro_after=0`, `fixed=1`, 8.3 s, $0.0266, `calc.py` changed `a - b` to
+  `a + b`; the entry says fixed only because the repro flipped and verify stayed green.
+  `py -3 -m unittest discover -s tests` -> `Ran 168 tests ... OK`.
 - **Models split across harnesses** (`adapters.DEFAULT_MODELS`): claude → `glm-5.3-flash`,
   dsh → `deepseek-v4.1-flash` (via `--patch`), opencode → `opencode-go/qwen3.8-flash`.
   Live trivial calls: 2.0 s / 5.2 s / 5.6 s. `council doctor` in skin-arb-app: **all three ok**
   (1.7 s / 5.2 s / 4.6 s) and it now probes the configured model, not the harness default.
+  Confirmed again in run `20261118-233507`: the three `command` lines in `events.jsonl` carry
+  all three ids. `doctor` now also fails when fewer than three distinct models are configured.
 - **The real bottleneck was not the models.** A 12 KB consult prompt sent dsh into 35 tool steps
   (reading a 4455-line file 30 lines per call); opencode died with `ECONNRESET` at 200 s. With a
   tool budget in the prompt ("at most 8 calls, grep, never page files over 300 lines") the same

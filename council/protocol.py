@@ -8,6 +8,7 @@ summarise three opinions will invent agreement that is not there.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -309,7 +310,76 @@ class CouncilOutcome:
     def exit_code(self) -> int:
         if self.decision == "error":
             return 1
-        return 0 if self.decision == "approve" else 2
+        return 0 if self.decision in ("approve", "advisory") else 2
+
+
+# --------------------------------------------------------------------------
+# one defect, one entry
+# --------------------------------------------------------------------------
+
+
+def finding_key(f: Finding) -> str:
+    """The root cause, not the wording: `file:line` when the peer named one.
+
+    Three agents describing one defect from three angles is the normal case,
+    not three defects. Without this key the same line inflates the blocker
+    count by the number of peers that noticed it.
+    """
+    words = "".join(c.lower() if (c.isalnum() or c.isspace()) else " " for c in f.issue)
+    digest = hashlib.sha256(" ".join(words.split()[:12]).encode("utf-8")).hexdigest()[:12]
+    if f.file:
+        loc = f.file.strip().replace("\\", "/")
+        # Without a line, the wording still separates two defects in one file.
+        return f"{loc}:{f.line}" if f.line else f"{loc}:issue:{digest}"
+    return f"issue:{digest}"
+
+
+def _merge_status(current: str, incoming: str) -> str:
+    """Confirmed beats an executed refutation, which beats an unproven claim."""
+    rank = {"": 0, "unverified": 1, "refuted": 2, "confirmed": 3}
+    return incoming if rank.get(incoming, 0) > rank.get(current, 0) else current
+
+
+def merge_findings(findings: list[Finding]) -> list[Finding]:
+    """Collapse duplicates by root cause, keeping the strongest evidence.
+
+    The merged entry reports every peer that found it (`dsh+opencode`) and the
+    best repro output, so nothing a peer proved is lost - only the repeated
+    lines are.
+    """
+    merged: dict[str, Finding] = {}
+    for f in findings:
+        key = finding_key(f)
+        first = merged.get(key)
+        if first is None:
+            merged[key] = Finding(
+                severity=f.severity, issue=f.issue, evidence=f.evidence,
+                source=f.source, file=f.file, line=f.line, fix=f.fix,
+                repro=f.repro, repro_output=f.repro_output, status=f.status,
+                checks=list(f.checks),
+            )
+            continue
+        if SEVERITY_ORDER.get(f.severity, 9) < SEVERITY_ORDER.get(first.severity, 9):
+            first.severity = f.severity
+            first.issue = f.issue
+        first.status = _merge_status(first.status, f.status)
+        if f.status == "confirmed" and not first.repro_output:
+            first.repro_output = f.repro_output
+        sources = set(first.source.split("+")) | set(f.source.split("+"))
+        first.source = "+".join(sorted(sources))
+        if f.evidence and f.evidence not in first.evidence:
+            if len(f.evidence) > len(first.evidence):
+                first.evidence = f.evidence
+            else:
+                first.evidence = (first.evidence + " | " + f.evidence)[:1500]
+        if not first.repro and f.repro:
+            first.repro = f.repro
+        if not first.fix and f.fix:
+            first.fix = f.fix
+        for check in f.checks:
+            if check not in first.checks:
+                first.checks.append(check)
+    return list(merged.values())
 
 
 # --------------------------------------------------------------------------
@@ -563,7 +633,7 @@ def render_proposal_synthesis(
     return "\n".join(lines)
 
 
-def _render_finding(f: Finding) -> list[str]:
+def _render_finding(f: Finding, known: str = "") -> list[str]:
     loc = f" `{f.file}:{f.line}`" if f.file else ""
     lines = [f"- **[{f.severity}]**{loc} {f.issue}"]
     lines.append(f"  - evidence: {f.evidence[:400]}  _(from {f.source})_")
@@ -571,22 +641,44 @@ def _render_finding(f: Finding) -> list[str]:
         first = (f.repro_output or "").splitlines()
         tail = first[-1][:120] if first else "not run"
         lines.append(f"  - repro: `{f.repro}` -> {tail}")
+    if known:
+        lines.append(f"  - **known open since {known}**: already on `.council/checklist.md`, "
+                     f"not a new defect - use `council drain` to close it")
     for check in f.checks[:4]:
         lines.append(f"  - cross-check: {check[:300]}")
     return lines
 
 
-def _render_findings_sections(findings: list[Finding]) -> list[str]:
+def _render_findings_sections(findings: list[Finding],
+                              known: dict[str, str] | None = None) -> list[str]:
+    known = known or {}
     confirmed = [f for f in findings if f.status == "confirmed" and f.has_evidence]
+    fresh = [f for f in confirmed if finding_key(f) not in known]
+    old = [f for f in confirmed if finding_key(f) in known]
     unverified = [f for f in findings if f.status in ("", "unverified") and f.has_evidence]
     refuted = [f for f in findings if f.status == "refuted"]
     discarded = [f for f in findings if not f.has_evidence and f.severity != "info"]
 
     lines: list[str] = []
-    lines += ["", "## Confirmed (blocking if blocker/major)", ""]
-    if confirmed:
-        for f in sorted(confirmed, key=lambda x: (SEVERITY_ORDER.get(x.severity, 9), x.source)):
+    def order(f: Finding):
+        # Same file, adjacent lines: one stale file reads as one block, not six
+        # alarms scattered through the report.
+        return (SEVERITY_ORDER.get(f.severity, 9), f.file or "~", f.line, f.source)
+
+    fresh_blocking = sum(1 for f in fresh if f.severity in ("blocker", "major"))
+    old_blocking = sum(1 for f in old if f.severity in ("blocker", "major"))
+    lines += ["", f"## New confirmed ({len(fresh)}, {fresh_blocking} blocking) - "
+                  f"blocking if blocker/major", ""]
+    if fresh:
+        for f in sorted(fresh, key=order):
             lines += _render_finding(f)
+    else:
+        lines.append("None.")
+    lines += ["", f"## Known open ({len(old)}, {old_blocking} blocking) - "
+                  f"already on the checklist, not new", ""]
+    if old:
+        for f in sorted(old, key=order):
+            lines += _render_finding(f, known.get(finding_key(f), "earlier"))
     else:
         lines.append("None.")
     lines += ["", "## Unverified (not blocking)", ""]
@@ -610,10 +702,19 @@ def _stamp(commit: str) -> str:
     return f"commit `{commit or 'no-commit'}` · {time.strftime('%Y-%m-%d %H:%M')}"
 
 
+def _count_line(findings: list[Finding], known: dict[str, str]) -> str:
+    blocking = [f for f in findings if f.blocks]
+    fresh = [f for f in blocking if finding_key(f) not in known]
+    old = len(blocking) - len(fresh)
+    return (f"{len(blocking)} confirmed blocker/major finding(s): "
+            f"{len(fresh)} new, {old} known open.")
+
+
 def render_diff_synthesis(
     decision: str, verdicts: dict[str, str], findings: list[Finding], diff_stat: str,
-    isolation: str = "", stamp: str = "",
+    isolation: str = "", stamp: str = "", known: dict[str, str] | None = None,
 ) -> str:
+    known = known or {}
     lines = ["# Council review", "", f"**Changed:** {diff_stat}", ""]
     if stamp:
         lines += [f"**Reviewed:** {stamp}", ""]
@@ -621,19 +722,20 @@ def render_diff_synthesis(
         lines += [f"**Snapshot:** {isolation}", ""]
     lines += ["## Verdict", ""]
     lines.append("**BLOCK**" if decision == "block" else "**APPROVE**")
-    blocking = [f for f in findings if f.blocks]
-    lines.append(f"\n{len(blocking)} confirmed blocker/major finding(s).")
+    lines.append(f"\n{_count_line(findings, known)}")
     lines += ["", "| agent | verdict |", "|---|---|"]
     for name in sorted(verdicts):
         lines.append(f"| {name} | {verdicts[name] or 'unparsed'} |")
-    lines += _render_findings_sections(findings)
+    lines += _render_findings_sections(findings, known)
     return "\n".join(lines)
 
 
 def render_consult_synthesis(
     decision: str, verdicts: dict[str, str], findings: list[Finding],
     user_message: str, diff_stat: str, isolation: str = "", stamp: str = "",
+    known: dict[str, str] | None = None,
 ) -> str:
+    known = known or {}
     first = next((ln for ln in user_message.strip().splitlines() if ln.strip()), "")
     lines = ["# Council session consult", "", f"**User message:** {first[:300]}", ""]
     if stamp:
@@ -645,15 +747,17 @@ def render_consult_synthesis(
     lines += ["## Verdict", ""]
     if decision == "block":
         lines.append("**BLOCK**")
+    elif decision == "advisory":
+        lines.append("**ADVISORY** - no change is under review, so nothing is vetoed")
     elif decision == "error":
         lines.append("**ERROR** - not enough agents answered")
     else:
         lines.append("**APPROVE**")
-    lines.append(f"\n{len([f for f in findings if f.blocks])} confirmed blocker/major finding(s).")
+    lines.append(f"\n{_count_line(findings, known)}")
     lines += ["", "| agent | verdict |", "|---|---|"]
     for name in sorted(verdicts):
         lines.append(f"| {name} | {verdicts[name] or 'unparsed'} |")
-    lines += _render_findings_sections(findings)
+    lines += _render_findings_sections(findings, known)
     return "\n".join(lines)
 
 
@@ -861,9 +965,29 @@ def _cross_round(store, ctx: ReviewContext, agents: list[str],
     return results
 
 
-def decide_review(verdicts: dict[str, str], findings: list[Finding]) -> str:
-    """A proven blocker/major blocks; otherwise a majority of block votes does."""
-    if any(f.blocks for f in findings):
+def _blocks_now(f: Finding, known: dict[str, str], changed: set[str]) -> bool:
+    """A known defect gates only the change that touches its own file."""
+    if not f.blocks:
+        return False
+    if finding_key(f) in known:
+        path = (f.file or "").replace("\\", "/")
+        touched = {c.replace("\\", "/") for c in changed}
+        return bool(path) and path in touched
+    return True
+
+
+def decide_review(verdicts: dict[str, str], findings: list[Finding],
+                  known: dict[str, str] | None = None,
+                  changed: set[str] | None = None) -> str:
+    """A proven blocker/major blocks; otherwise a majority of block votes does.
+
+    `known` maps `file:line` to the date it entered `.council/checklist.md`.
+    A known-open defect that this diff does not touch is backlog, not a veto:
+    re-blocking it on every unrelated turn is what buried the real findings.
+    """
+    known = known or {}
+    changed = set(changed or ())
+    if any(_blocks_now(f, known, changed) for f in findings):
         return "block"
     answered = [v for v in verdicts.values() if v in ("approve", "block")]
     if answered and sum(1 for v in answered if v == "block") * 2 > len(answered):
@@ -871,14 +995,42 @@ def decide_review(verdicts: dict[str, str], findings: list[Finding]) -> str:
     return "approve"
 
 
+def decide_consult(verdicts: dict[str, str], findings: list[Finding],
+                   known: dict[str, str] | None = None,
+                   has_diff: bool = False,
+                   changed: set[str] | None = None) -> str:
+    """A conversational turn cannot block: there is no change to veto.
+
+    With an uncommitted diff the consult is a real gate and behaves like a
+    review. Without one it reports findings as ADVISE, so a question does not
+    come back as a pile of "new errors" about code the user did not touch.
+    """
+    if not has_diff:
+        confirmed = [f for f in findings
+                     if f.status == "confirmed" and f.severity in ("blocker", "major")]
+        if confirmed:
+            return "advisory"
+        return decide_review(verdicts, findings)
+    return decide_review(verdicts, findings, known, changed)
+
+
 def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
                      findings: list[Finding], agents: list[str],
-                     cfgs: dict[str, AgentConfig], on_done):
+                     cfgs: dict[str, AgentConfig], on_done, *,
+                     consult: bool = False, has_diff: bool = False):
     project_mod.verify_repros(ctx.workdir, findings)
     before = len(findings)
     cross_results = _cross_round(store, ctx, agents, cfgs, findings, on_done)
     project_mod.verify_repros(ctx.workdir, findings[before:])
-    decision = decide_review(verdicts, findings)
+    # One defect, one entry: three peers naming the same line is one blocker.
+    findings[:] = merge_findings(findings)
+    known = (project_mod.lesson_index(ctx.project, exclude_run=store.run_id)
+             if ctx.options.get("lessons") else {})
+    changed = set(project_mod.changed_paths(ctx.project))
+    if consult:
+        decision = decide_consult(verdicts, findings, known, has_diff, changed)
+    else:
+        decision = decide_review(verdicts, findings, known, changed)
     added = 0
     if ctx.options.get("lessons"):
         added = project_mod.append_lessons(ctx.project, findings, store.run_id)
@@ -888,7 +1040,7 @@ def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
         "refuted": [f.to_dict() for f in findings if f.status == "refuted"],
         "lessons_added": added,
     })
-    return cross_results, decision, added
+    return cross_results, decision, added, known
 
 
 def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
@@ -1177,6 +1329,7 @@ def run_work_loop(
             round_findings.extend(parsed)
 
         _verify_repros_isolated(project, round_findings)
+        round_findings = merge_findings(round_findings)
         blocking = [f for f in round_findings if f.blocks]
         remaining = blocking
         last_verdicts = dict(verdicts)
@@ -1323,11 +1476,11 @@ def run_diff_review(
             return CouncilOutcome("review", "error", findings, [], results, store.dir, synthesis,
                                   _short("error", "not enough agents answered"))
 
-        cross_results, decision, _ = _finalize_review(
+        cross_results, decision, _, known = _finalize_review(
             store, ctx, verdicts, findings, agents, cfgs, on_done)
         results = results + cross_results
         synthesis = render_diff_synthesis(decision, verdicts, findings, diff_stat,
-                                          ctx.isolation, stamp)
+                                          ctx.isolation, stamp, known)
         store.write("synthesis.md", synthesis)
         store.log({
             "event": "synthesis", "decision": decision, "verdicts": verdicts,
@@ -1436,11 +1589,13 @@ def run_session_consult(
             return CouncilOutcome("consult", "error", findings, [], results, store.dir, synthesis,
                                   _short("error", "not enough agents answered"))
 
-        cross_results, decision, _ = _finalize_review(
-            store, ctx, verdicts, findings, agents, cfgs, on_done)
+        cross_results, decision, _, known = _finalize_review(
+            store, ctx, verdicts, findings, agents, cfgs, on_done,
+            consult=True, has_diff=bool(diff.strip()))
         results = results + cross_results
         synthesis = render_consult_synthesis(decision, verdicts, findings,
-                                             user_message, diff_stat, ctx.isolation, stamp)
+                                             user_message, diff_stat, ctx.isolation, stamp,
+                                             known)
         store.write("synthesis.md", synthesis)
         store.log({
             "event": "synthesis", "decision": decision, "verdicts": verdicts,

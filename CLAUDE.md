@@ -13,6 +13,8 @@ council review --path sandbox               # cross-review a diff
 council --project sandbox work "<task>"     # plan -> execute -> verify -> fix
 council --project <p> consult --prompt-file <f>  # three agents join a user message
 council --project <p> review --tier full    # force lean | standard | full
+council --project <p> drain --dry-run       # what the last run proved, no edits
+council --project <p> drain                 # fix each confirmed finding, prove by repro
 py -3 benchmarks\run_benchmark.py           # seeded-defect benchmark across tiers
 ```
 
@@ -40,6 +42,8 @@ new user message is queued (latest wins) and the running child drains the queue 
 - `council/prompts.py` — prompts. The output contract goes **last** in each prompt.
 - `council/hooks.py` — Stop and UserPromptSubmit entry points, the shared run lock, the
   transcript digest, and detached spawns. Hooks must stay fast and never raise.
+- `council/drain.py` — closes a run's confirmed findings with proof (repro flips
+  non-zero → zero, verify stays green); `--dry-run` executes the repros only.
 - `council/gitutil.py` — diff collection; untracked files are included as full additions.
 - `council/store.py` — `.council/runs/<id>/`; the only shared state between harnesses.
 - `council/cli.py` — argparse. Exit codes: 0 approve, 2 block, 1 error.
@@ -143,6 +147,31 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     run with "ValidationError: invalid config: $.provider". `--patch` is a launcher flag and
     must come before the first app option (`--permission-mode`), or dsh exits 1 with
     "unknown option '--patch'".
+
+23. **One defect, one entry.** `finding_key` is `file:line` (or a wording digest
+    when no location was named) and `merge_findings` collapses duplicates after
+    the cross round. Three peers describing one line are one blocker with
+    `source = "claude+dsh+opencode"`. Never count raw findings in a verdict: 17
+    findings were 9 defects and 3 root causes on a real run.
+24. **Known is not new.** `project.lesson_index` maps `file:line` to the date it
+    entered `.council/checklist.md`; the synthesis puts those under "Known open"
+    and the count line reads "N new, M known open". A known defect blocks only
+    when the current diff touches its file, so an unrelated turn cannot re-veto
+    an old backlog item. `append_lessons` runs after the index is read, and
+    `exclude_run` keeps a run from recognising its own fresh findings.
+25. **A consult without a diff is ADVISORY.** No change, no veto: the decision
+    is `advisory` (exit 0) and `pending_is_news` suppresses the message entirely
+    when it would only repeat the checklist. This is what stops every question
+    from coming back as a pile of "new errors". The Stop review with a diff is
+    still the real gate.
+26. **`drain` is the only place a finding is called fixed.** For each confirmed
+    blocker/major: run its REPRO in the live tree (exit 0 = already gone) →
+    one executor fixes → re-run the same REPRO (exit 0 = fixed) → verify command
+    green. A finding without a repro is `skipped`, and `skipped` is not `clear`
+    (exit 2). No model's "looks fixed" is accepted as evidence.
+27. **`council doctor` fails on a model collision.** Three agents on one model
+    share blind spots, so `doctor` compares the resolved model ids and returns 1
+    when fewer than three distinct ones are configured.
 
 ## Rules for changes
 - A new harness flag goes in `adapters.py` and nowhere else.

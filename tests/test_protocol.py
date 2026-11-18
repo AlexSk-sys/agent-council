@@ -37,13 +37,17 @@ from council.protocol import (
     _failure_verdict,
     _prepare_review,
     _verify_repros_isolated,
+    decide_consult,
     decide_review,
     extract_json_objects,
+    finding_key,
     merge_diff_review,
+    merge_findings,
     merge_proposals,
     parse_checks,
     parse_diff_review,
     parse_peer_reviews,
+    render_consult_synthesis,
     run_session_consult,
     run_work_loop,
     render_diff_synthesis,
@@ -836,9 +840,22 @@ class TestSessionConsult(unittest.TestCase):
                         "REPRO: python -c \"raise SystemExit(1)\""}
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
-                out = run_session_consult(Path(tmp), "hello")
+                out = run_session_consult(Path(tmp), "hello", diff="+boom\n")
             self.assertEqual(out.decision, "block")
             self.assertEqual(out.findings[0].status, "confirmed")
+
+    def test_consult_without_a_diff_is_advisory_not_a_veto(self):
+        """A question about untouched code must not come back as a blocker."""
+        texts = {"dsh": "VERDICT: BLOCK\n"
+                        "FINDING: blocker | a.py:1 | boom | read a.py:1\n"
+                        "REPRO: python -c \"raise SystemExit(1)\""}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("council.protocol.run_agent", side_effect=self._fake(texts)):
+                out = run_session_consult(Path(tmp), "hello")
+            self.assertEqual(out.findings[0].status, "confirmed")
+            self.assertEqual(out.decision, "advisory")
+            self.assertEqual(out.exit_code, 0)
+            self.assertIn("ADVISORY", out.synthesis)
 
     def test_repro_exit_zero_refutes_and_approves(self):
         texts = {"dsh": "VERDICT: BLOCK\n"
@@ -858,7 +875,7 @@ class TestSessionConsult(unittest.TestCase):
             self._force_cross(root)
             with mock.patch("council.protocol.run_agent",
                             side_effect=self._fake(texts, checks)):
-                out = run_session_consult(root, "hello")
+                out = run_session_consult(root, "hello", diff="+boom\n")
             self.assertEqual(out.findings[0].status, "confirmed")
             self.assertEqual(out.decision, "block")
 
@@ -881,7 +898,7 @@ class TestSessionConsult(unittest.TestCase):
             self._force_cross(root)
             with mock.patch("council.protocol.run_agent",
                             side_effect=self._fake(texts, checks)):
-                out = run_session_consult(root, "hello")
+                out = run_session_consult(root, "hello", diff="+boom\n")
             self.assertEqual(out.findings[0].status, "confirmed")
             self.assertEqual(out.decision, "block")
 
@@ -1638,6 +1655,156 @@ class TestNoWindowCoverage(unittest.TestCase):
             offenders, [],
             "subprocess calls without CREATE_NO_WINDOW: " + ", ".join(offenders),
         )
+
+
+class TestRootCauseMerge(unittest.TestCase):
+    """Three peers naming one line is one defect, not three."""
+
+    @staticmethod
+    def _f(source, file="a.py", line=1, severity="major", status="unverified",
+           issue="boom", evidence="read a.py:1", repro="", repro_output=""):
+        return Finding(severity=severity, issue=issue, evidence=evidence,
+                       source=source, file=file, line=line, repro=repro,
+                       repro_output=repro_output, status=status)
+
+    def test_three_peers_on_one_line_are_one_defect(self):
+        merged = merge_findings([
+            self._f("dsh", status="confirmed", repro="py -3 -c \"raise SystemExit(1)\"",
+                    repro_output="exit 1"),
+            self._f("opencode", evidence="read a.py:1 again"),
+            self._f("claude", severity="blocker", issue="same line, other words"),
+        ])
+        self.assertEqual(len(merged), 1)
+        found = merged[0]
+        self.assertEqual(found.source, "claude+dsh+opencode")
+        self.assertEqual(found.severity, "blocker")
+        self.assertEqual(found.status, "confirmed")
+        self.assertTrue(found.repro)
+        self.assertIn("again", found.evidence)
+
+    def test_different_lines_stay_separate(self):
+        merged = merge_findings([self._f("dsh", line=1), self._f("dsh", line=2)])
+        self.assertEqual(len(merged), 2)
+
+    def test_findings_without_a_location_dedupe_by_wording(self):
+        merged = merge_findings([
+            self._f("dsh", file="", line=0, issue="The suite is red"),
+            self._f("claude", file="", line=0, issue="the suite is red!"),
+        ])
+        self.assertEqual(len(merged), 1)
+
+    def test_same_file_without_a_line_does_not_over_merge(self):
+        merged = merge_findings([
+            self._f("dsh", file="a.py", line=0, issue="first defect"),
+            self._f("claude", file="a.py", line=0, issue="second defect"),
+        ])
+        self.assertEqual(len(merged), 2)
+
+    def test_a_refuted_peer_beats_an_unproven_one(self):
+        merged = merge_findings([
+            self._f("dsh", status="unverified"),
+            self._f("claude", status="refuted"),
+        ])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].status, "refuted")
+
+    def test_finding_key_prefers_file_and_line(self):
+        self.assertEqual(finding_key(self._f("dsh", file="a\\b.py", line=7)), "a/b.py:7")
+        self.assertTrue(finding_key(self._f("dsh", file="", line=0)).startswith("issue:"))
+
+
+class TestKnownOpen(unittest.TestCase):
+    def _project(self, root: Path, line: str) -> None:
+        (root / ".council").mkdir()
+        (root / ".council" / "checklist.md").write_text(line + "\n", encoding="utf-8")
+
+    def test_lesson_index_reads_location_and_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._project(
+                root,
+                "- [2026-11-15] [blocker] x -- evidence: e (dsh; run1) "
+                "<!--abc loc:tools/a.py:28:blocker-->\n"
+                "- [2026-11-17] [major] y -- evidence: e (dsh; run2) "
+                "<!--def loc:C:\\w\\b.py:5:major-->")
+            index = project_mod.lesson_index(root)
+            self.assertEqual(index.get("tools/a.py:28"), "2026-11-15")
+            self.assertEqual(index.get("C:/w/b.py:5"), "2026-11-17")
+
+    def test_exclude_run_ignores_this_runs_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._project(root, "- [2026-11-15] [blocker] x -- e (dsh; run1) "
+                                "<!--abc loc:a.py:1:blocker-->")
+            self.assertEqual(project_mod.lesson_index(root), {"a.py:1": "2026-11-15"})
+            self.assertEqual(project_mod.lesson_index(root, exclude_run="run1"), {})
+
+    def test_known_finding_does_not_block_an_untouched_file(self):
+        finding = Finding(severity="blocker", issue="x", evidence="e", source="dsh",
+                          file="a.py", line=1, status="confirmed")
+        known = {"a.py:1": "2026-11-15"}
+        approve = {"dsh": "approve", "claude": "approve", "opencode": "approve"}
+        self.assertEqual(decide_review(approve, [finding], known, {"b.py"}), "approve")
+        self.assertEqual(decide_review(approve, [finding], known, {"a.py"}), "block")
+        self.assertEqual(decide_review(approve, [finding], {}, {"b.py"}), "block")
+
+    def test_advisory_only_without_a_diff(self):
+        finding = Finding(severity="major", issue="x", evidence="e", source="dsh",
+                          file="a.py", line=1, status="confirmed")
+        verdicts = {"dsh": "block", "claude": "approve"}
+        self.assertEqual(decide_consult(verdicts, [finding], {}, has_diff=False),
+                         "advisory")
+        self.assertEqual(decide_consult(verdicts, [finding], {}, has_diff=True), "block")
+        self.assertEqual(decide_consult({"dsh": "approve"}, [], {}, has_diff=False),
+                         "approve")
+
+
+class TestPendingIsNews(unittest.TestCase):
+    def test_advisory_known_only_is_silent(self):
+        from council.hooks import pending_is_news
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council" / "runs" / "run1").mkdir(parents=True)
+            (root / ".council" / "checklist.md").write_text(
+                "- [2026-11-15] [blocker] x -- e (dsh; run0) "
+                "<!--abc loc:a.py:1:blocker-->", encoding="utf-8")
+            old = Finding(severity="blocker", issue="x", evidence="e", source="dsh",
+                          file="a.py", line=1, status="confirmed")
+            self.assertFalse(pending_is_news(root, "advisory", [old],
+                                             root / ".council" / "runs" / "run1"))
+            fresh = Finding(severity="blocker", issue="y", evidence="e", source="dsh",
+                            file="a.py", line=2, status="confirmed")
+            self.assertTrue(pending_is_news(root, "advisory", [fresh],
+                                            root / ".council" / "runs" / "run1"))
+            self.assertTrue(pending_is_news(root, "block", [old],
+                                            root / ".council" / "runs" / "run1"))
+
+
+class TestDedupedSynthesis(unittest.TestCase):
+    def test_known_findings_move_out_of_the_new_section(self):
+        fresh = Finding(severity="blocker", issue="new", evidence="e1", source="dsh",
+                        file="a.py", line=1, status="confirmed")
+        old = Finding(severity="major", issue="old", evidence="e2", source="claude",
+                      file="b.py", line=2, status="confirmed")
+        text = render_consult_synthesis("advisory",
+                                        {"dsh": "block", "claude": "block"},
+                                        [fresh, old], "hi", "",
+                                        known={"b.py:2": "2026-11-15"})
+        self.assertIn("## New confirmed (1, 1 blocking)", text)
+        self.assertIn("## Known open (1, 1 blocking)", text)
+        self.assertIn("known open since 2026-11-15", text)
+        self.assertIn("1 new, 1 known open", text)
+
+    def test_five_reports_of_one_line_render_once(self):
+        reports = [
+            Finding(severity="blocker", issue=f"word counter {n}", evidence=f"read a.py:1 {n}",
+                    source=agent, file="a.py", line=1, status="confirmed")
+            for n, agent in enumerate(["dsh", "opencode", "claude", "dsh", "opencode"])
+        ]
+        text = render_diff_synthesis("block", {"dsh": "block"},
+                                     merge_findings(reports), "a.py | 1 +")
+        self.assertEqual(text.count("- **[blocker]**"), 1)
+        self.assertIn("1 confirmed blocker/major finding(s): 1 new", text)
 
 
 if __name__ == "__main__":
