@@ -30,7 +30,7 @@ standard / full and records recall, false blockers, time and cost. 137 unit test
 ## Blocked
 - Nothing.
 
-## Verified (2026-11-18, three models)
+## Verified (dated evidence)
 - **Models split across harnesses** (`adapters.DEFAULT_MODELS`): claude → `glm-5.3-flash`,
   dsh → `deepseek-v4.1-flash` (via `--patch`), opencode → `opencode-go/qwen3.8-flash`.
   Live trivial calls: 2.0 s / 5.2 s / 5.6 s. `council doctor` in skin-arb-app: **all three ok**
@@ -60,7 +60,6 @@ standard / full and records recall, false blockers, time and cost. 137 unit test
 - Unverified findings are shown but never block; a finding is only a gate once a repro, a peer
   CHECK, or the verify command confirms it.
 
-## Verified (dated evidence)
 - **2026-11-15** — console windows, second pass: the remaining flashes came from plugin hooks,
   not the council. `security-guidance` ran `bash` on prompt/tool/stop, `hookify` ran `python3`
   on prompt/tool/stop, and `tokeneconomizer` ran a `/bin/sh` launcher on prompt/tool/stop. All
