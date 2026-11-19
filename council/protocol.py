@@ -672,7 +672,14 @@ def _render_finding(f: Finding, known: str = "") -> list[str]:
     lines.append(f"  - evidence: {f.evidence[:400]}  _(from {f.source})_")
     if f.repro:
         first = (f.repro_output or "").splitlines()
-        tail = first[-1][:120] if first else "not run"
+        if first:
+            tail = first[-1][:120]
+        elif f.status == "confirmed":
+            tail = "ran, failed with no output"
+        elif f.status == "refuted":
+            tail = "ran, exit 0 (no output)"
+        else:
+            tail = "not run"
         lines.append(f"  - repro: `{f.repro}` -> {tail}")
     if known:
         lines.append(f"  - **known open since {known}**: already on `.council/checklist.md`, "
@@ -1052,12 +1059,15 @@ def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
                      findings: list[Finding], agents: list[str],
                      cfgs: dict[str, AgentConfig], on_done, *,
                      consult: bool = False, has_diff: bool = False):
+    # One defect, one entry - merged BEFORE the repros run, so a merged entry
+    # carries every peer's repro and `verify_repros` can require all of them.
+    findings[:] = merge_findings(findings)
     project_mod.verify_repros(ctx.workdir, findings)
     before = len(findings)
     cross_results = _cross_round(store, ctx, agents, cfgs, findings, on_done)
-    project_mod.verify_repros(ctx.workdir, findings[before:])
-    # One defect, one entry: three peers naming the same line is one blocker.
-    findings[:] = merge_findings(findings)
+    fresh = merge_findings(findings[before:])
+    project_mod.verify_repros(ctx.workdir, fresh)
+    findings[:] = merge_findings(findings[:before] + fresh)
     known = (project_mod.lesson_index(ctx.project, exclude_run=store.run_id)
              if ctx.options.get("lessons") else {})
     changed = set(project_mod.changed_paths(ctx.project))

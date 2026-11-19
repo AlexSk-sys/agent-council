@@ -1367,6 +1367,20 @@ class TestProjectContext(unittest.TestCase):
             self.assertEqual(blocked.status, "unverified")
             self.assertTrue(blocked.repro_output.startswith("blocked"))
 
+    def test_every_extra_repro_must_pass_to_refute(self):
+        """A merged entry with two repros is refuted only when both exit 0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mixed = Finding("major", "x", "e", "dsh",
+                            repro='py -3 -c "raise SystemExit(0)"',
+                            extra_repros=['py -3 -c "raise SystemExit(1)"'])
+            clean = Finding("major", "y", "e", "dsh",
+                            repro='py -3 -c "raise SystemExit(0)"',
+                            extra_repros=['py -3 -c "raise SystemExit(0)"'])
+            project_mod.verify_repros(root, [mixed, clean])
+            self.assertEqual(mixed.status, "confirmed")
+            self.assertEqual(clean.status, "refuted")
+
     def test_lessons_are_deduplicated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
