@@ -180,7 +180,12 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     model id (`qwen3.8-max`), selected through `overrides.opencode.model`. A configured
     `effort` is reported in `stderr` instead of being silently dropped. A non-zero exit is a
     failed run even when stdout holds a text event - a truncated stream is not a vote.
-28. **`council doctor` fails on a model collision.** Three agents on one model
+28. **A timed-out voice gets one more attempt with MORE time.** `needs_lean_retry`
+    fires on a `timeout` verdict even when the quorum of two answered, and the retry runs
+    at `max(timeout, 600)` on a prompt without impact/docs/lessons. The old 240 s retry
+    was a second guaranteed loss for the slowest harness. The cross-round prompt now
+    carries the tool budget too - it was the only template without it.
+29. **`council doctor` fails on a model collision.** Three agents on one model
     share blind spots, so `doctor` compares the resolved model ids and returns 1
     when fewer than three distinct ones are configured.
 

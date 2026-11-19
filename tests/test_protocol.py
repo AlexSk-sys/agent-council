@@ -44,6 +44,7 @@ from council.protocol import (
     merge_diff_review,
     merge_findings,
     merge_proposals,
+    needs_lean_retry,
     parse_checks,
     parse_diff_review,
     parse_peer_reviews,
@@ -327,6 +328,23 @@ class TestParallelism(unittest.TestCase):
         self.assertLess(elapsed, 1.5, f"took {elapsed:.2f}s — agents ran sequentially")
 
 
+class TestNeedsLeanRetry(unittest.TestCase):
+    def test_two_answers_with_a_timeout_still_retry(self):
+        self.assertTrue(needs_lean_retry({"claude": "approve",
+                                          "opencode": "block",
+                                          "dsh": "timeout"}))
+
+    def test_two_answers_without_a_timeout_do_not(self):
+        self.assertFalse(needs_lean_retry({"claude": "approve",
+                                           "opencode": "block",
+                                           "dsh": "approve"}))
+
+    def test_below_quorum_retries(self):
+        self.assertTrue(needs_lean_retry({"claude": "approve",
+                                          "opencode": "error: boom",
+                                          "dsh": "timeout"}))
+
+
 class TestLeanRetry(unittest.TestCase):
     """The recovery for a timed-out voice must deliver its prompt.
 
@@ -372,7 +390,7 @@ class TestLeanRetry(unittest.TestCase):
             captured = self._run(cfgs, {"claude": "timeout"})
             self.assertEqual(len(captured), 1, "lean retry did not call the agent")
             args, timeout_s = captured[0]
-            self.assertEqual(timeout_s, 240)
+            self.assertEqual(timeout_s, 600, "a timed-out voice needs more time, not less")
             self.assertIn("--model", args)
             self.assertIn("m1", args)
             self.assertIn("--x", args)

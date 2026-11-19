@@ -239,6 +239,14 @@ FINDINGS:
 
 {context}
 
+HOW MUCH TO LOOK AT:
+- You have a budget of at most 6 tool calls and your whole answer must arrive in time.
+- Grep for the symbol instead of reading a large file; never page through a file
+  longer than 300 lines. dsh shows ~30 lines per read, so a 4000-line file is
+  150 calls and no answer at all.
+- An unfinished cross-check is worthless: when the budget is spent, answer with
+  the verdict you can support from what you read.
+
 Reply with ONLY lines in this format, nothing else:
 
 CHECK: <number> | <CONFIRM|REFUTE> | <evidence: command output or file:line>

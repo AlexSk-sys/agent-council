@@ -1087,6 +1087,16 @@ def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
     return cross_results, decision, added, known
 
 
+def needs_lean_retry(verdicts: dict[str, str]) -> bool:
+    """Too few voices, or one that timed out even though two answered.
+
+    A timeout used to be tolerated whenever the quorum of two was met, so the
+    slowest harness quietly sat out every review.
+    """
+    answered = [v for v in verdicts.values() if v in ("approve", "block")]
+    return len(answered) < MIN_AGENTS or "timeout" in verdicts.values()
+
+
 def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
                 verdicts: dict[str, str], findings: list[Finding], *,
                 user_message: str = "", diff: str = "", mode: str = "review",
@@ -1095,7 +1105,8 @@ def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
 
     A 150 KB prompt with whole changed files, docs and lessons is what pushes a
     slow harness past its timeout. The retry sends the message and a shortened
-    diff only, at 240 s, so a third voice comes back instead of being lost.
+    diff only, with at least 600 s, so a third voice comes back instead of
+    being lost.
     """
     failed = [a for a in agents if verdicts.get(a) not in ("approve", "block")]
     if not failed:
@@ -1105,7 +1116,10 @@ def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
     # on the .cmd shim argv and was cut at its first newline (the recovery
     # could never deliver its prompt). It also dropped model/extra_args, which
     # would have sent the retry to a different backend than round 1.
-    lean_cfgs = {a: replace(cfgs[a], timeout_s=240) for a in failed}
+    # A voice that just spent its whole timeout needs MORE time on a smaller
+    # prompt, not less: 240 s was a second guaranteed loss for dsh.
+    lean_cfgs = {a: replace(cfgs[a], timeout_s=max(cfgs[a].timeout_s, 600))
+                 for a in failed}
     diff_cut = (diff or "")[:15000]
     calls: dict[str, tuple[str, str]] = {}
     for a in failed:
@@ -1508,7 +1522,7 @@ def run_diff_review(
             findings.extend(parsed)
 
         answered = [v for v in verdicts.values() if v in ("approve", "block")]
-        if len(answered) < MIN_AGENTS:
+        if needs_lean_retry(verdicts):
             results = results + _lean_retry(store, ctx, agents, cfgs, verdicts,
                                             findings, diff=diff, mode="review",
                                             on_done=on_done)
@@ -1620,7 +1634,7 @@ def run_session_consult(
             findings.extend(parsed)
 
         answered = [v for v in verdicts.values() if v in ("approve", "block")]
-        if len(answered) < MIN_AGENTS:
+        if needs_lean_retry(verdicts):
             results = results + _lean_retry(store, ctx, agents, cfgs, verdicts,
                                             findings, user_message=user_message,
                                             diff=diff, mode="consult", on_done=on_done)
