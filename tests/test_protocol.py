@@ -1308,6 +1308,34 @@ class TestConsultCommand(unittest.TestCase):
             state = load_state(root)
             self.assertEqual(state["consult"]["decision"], "block")
 
+    def test_background_review_writes_a_provisional_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                            "commit", "-qm", "init"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 2\n", encoding="utf-8")
+            finding = Finding(severity="blocker", issue="x", evidence="e",
+                              source="dsh", file="a.py", line=1, status="confirmed")
+            outcome = CouncilOutcome("review", "block", [finding], [], [],
+                                     root / "run", "", "BLOCK")
+            captured: dict = {}
+
+            def fake_review(*_args, **kwargs):
+                captured["cb"] = kwargs.get("on_provisional")
+                return outcome
+
+            with mock.patch("council.cli.run_diff_review", side_effect=fake_review):
+                code = main(["--project", str(root), "review",
+                             "--background", "--diff", "HEAD"])
+            self.assertEqual(code, 2)
+            self.assertIsNotNone(captured["cb"])
+            captured["cb"]("block", [finding], root / "run")
+            text = (root / ".council" / "pending.md").read_text(encoding="utf-8")
+            self.assertIn("review (provisional)", text)
+
     def test_background_approve_with_nothing_new_stays_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1438,6 +1466,8 @@ class TestProjectContext(unittest.TestCase):
         self.assertFalse(project_mod.repro_allowed("rm -rf /"))
         self.assertFalse(project_mod.repro_allowed("curl https://example.com"))
         self.assertFalse(project_mod.repro_allowed(""))
+        self.assertFalse(project_mod.repro_allowed('git commit -m "x"'))
+        self.assertFalse(project_mod.repro_allowed("git stash"))
 
     def test_verify_repros_confirms_refutes_and_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:

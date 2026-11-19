@@ -1131,8 +1131,8 @@ def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
             provisional = (decide_consult(verdicts, findings, known, has_diff, changed)
                            if consult else decide_review(verdicts, findings, known, changed))
             on_provisional(provisional, findings, store.dir)
-        except Exception:
-            pass
+        except Exception as exc:  # the final verdict must still be written
+            store.log({"event": "provisional_failed", "error": str(exc)[:200]})
     before = len(findings)
     cross_results = _cross_round(store, ctx, agents, cfgs, findings, on_done)
     fresh = merge_findings(findings[before:])

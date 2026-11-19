@@ -25,7 +25,7 @@ One defect, one entry, and closure with proof:
 9. the round-1 verdict is written to `pending.md` as **provisional** before the cross round
    starts, and the final verdict overwrites it — a first opinion no longer waits for cross.
 The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are unchanged.
-200 unit tests green.
+201 unit tests green.
 
 ## Next (max 3)
 1. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the
@@ -40,6 +40,11 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
 - Nothing.
 
 ## Verified (dated evidence)
+- **2026-11-19 — provisional verdict measured.** A read-only review of commit `2b91a4f` on a
+  fresh worktree, `--background`: the **provisional** verdict landed in `pending.md` at
+  **245 s** (`[background council review (provisional)] BLOCK: 3 new ...`), the final verdict
+  with the cross round at **638 s**, exit 2. First opinion is 2.6x earlier; all three voices
+  answered. `Ran 201 tests ... OK`.
 - **2026-11-19 — why dsh sat out every review, measured.** A 600 s probe of the exact
   cross-round prompt answered at **506 s**, and its answer named the cause:
   `sandbox-local windows-acl temp grant materialization failed` on every shell call. In
