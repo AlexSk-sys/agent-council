@@ -17,13 +17,13 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
 168 unit tests green.
 
 ## Next (max 3)
-1. Drain agent-council's own backlog (`council drain --project .`): known open are
-   `adapters.py:169` (POSIX `killpg` without `start_new_session` - one timed-out voice can
-   SIGKILL the run) and opencode silently dropping `cfg.effort`.
-2. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the
+1. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the
    user approves edits to the stories.
-3. Measure one day of automatic consults after the change: count `pending.md` writes - the
+2. Measure one day of automatic consults after the change: count `pending.md` writes - the
    expected result is "only new confirmed findings", i.e. mostly none.
+3. The `.council/checklist.md` of agent-council still lists older entries (including one for
+   `stream-cat3d` resolved through the home directory); prune what was fixed by hand, with the
+   repro that proves it, rather than deleting lines.
 
 ## Blocked
 - Nothing.
@@ -36,6 +36,16 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
   `repro_before=1 -> repro_after=0`, `fixed=1`, 8.3 s, $0.0266, `calc.py` changed `a - b` to
   `a + b`; the entry says fixed only because the repro flipped and verify stayed green.
   `py -3 -m unittest discover -s tests` -> `Ran 168 tests ... OK`.
+- **2026-11-19 — the three adapter defects that the council confirmed are fixed, each with the
+  test whose absence was itself a finding.** POSIX: the child is spawned with
+  `start_new_session=True`, so `killpg(getpgid(pid))` cannot reach the council's group.
+  opencode: a configured `effort` is reported in `stderr` instead of being silently dropped -
+  a live probe proved `--model opencode-go/qwen3.8-flash#high` is rejected
+  (`provider.no-route: Variant unavailable`), so effort there is a different model id
+  (`qwen3.8-max`). opencode: a non-zero exit is a failed run even when stdout holds a text
+  event. `tests/test_adapters.py` adds 8 tests (process group, `_kill_tree`, model forwarding
+  for all three runners, effort note, failed-run rule).
+  `py -3 -m unittest discover -s tests` -> `Ran 176 tests ... OK`.
 - **Models split across harnesses** (`adapters.DEFAULT_MODELS`): claude → `glm-5.3-flash`,
   dsh → `deepseek-v4.1-flash` (via `--patch`), opencode → `opencode-go/qwen3.8-flash`.
   Live trivial calls: 2.0 s / 5.2 s / 5.6 s. `council doctor` in skin-arb-app: **all three ok**

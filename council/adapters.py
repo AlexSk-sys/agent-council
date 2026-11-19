@@ -176,19 +176,23 @@ def _run(args: list[str], cwd: str, timeout_s: int, env_extra: dict | None = Non
     if env_extra:
         env.update(env_extra)
     started = time.monotonic()
+    spawn = dict(
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        env=env,
+    )
+    if os.name != "nt":
+        # Its own process group: _kill_tree calls killpg(getpgid(pid)), and
+        # without this the child shares the council's group, so one timed-out
+        # voice SIGKILLs the whole run and its parent shell.
+        spawn["start_new_session"] = True
     try:
-        proc = subprocess.Popen(
-            args,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            env=env,
-            **_no_window(),
-        )
+        proc = subprocess.Popen(args, **_no_window(), **spawn)
     except FileNotFoundError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         return None, elapsed, f"executable not found: {exc}"
@@ -363,16 +367,31 @@ def run_opencode(prompt: str, cwd: str, cfg: AgentConfig) -> AgentResult:
     args += cfg.extra_args
     args.append(_materialize_prompt(prompt, cfg))
 
+    # `opencode run` has no effort flag, and a `#variant` suffix is rejected
+    # by the gateway ("Variant unavailable for ..."). Effort on this harness is
+    # a different model id (`qwen3.8-max`), chosen via overrides.<agent>.model.
+    # Say so instead of silently dropping a configured knob.
+    effort_note = ""
+    if cfg.effort:
+        effort_note = (f"council: effort {cfg.effort!r} was not passed to opencode; "
+                       f"it has no effort flag - use overrides.opencode.model "
+                       f"(e.g. opencode-go/qwen3.8-max) instead\n")
+
     proc, elapsed, err = _run(args, cwd, cfg.timeout_s)
     res = AgentResult(agent="opencode", ok=False, elapsed_ms=elapsed,
                       command=" ".join(args[:-1]) + " <prompt>")
     if proc is None:
         res.error = err
+        res.stderr = effort_note
         return res
 
-    res.stderr = proc.stderr or ""
-    if proc.returncode != 0 and not proc.stdout.strip():
-        res.error = f"exit {proc.returncode}: {(proc.stderr or '')[-500:]}"
+    res.stderr = effort_note + (proc.stderr or "")
+    if proc.returncode != 0:
+        # A failed run is not an opinion, even when it emitted a text event
+        # before dying: a truncated stream used to become an authoritative
+        # vote while the harness error was discarded.
+        res.error = (f"exit {proc.returncode}: "
+                     f"{(proc.stderr or proc.stdout)[-500:]}")
         return res
 
     chunks: list[str] = []

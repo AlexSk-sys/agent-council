@@ -137,6 +137,9 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     only and then blocks on a pipe the grandchildren still hold: a 300 s timeout was measured
     returning after 375 s and leaving idle `node` processes behind on every lost voice.
     `adapters._run` uses Popen + `taskkill /F /T /PID` (`_kill_tree`) so the deadline is real.
+    On POSIX the child is spawned with `start_new_session=True`; without it
+    `killpg(getpgid(pid))` reaches the council's own group and one slow voice SIGKILLs the
+    whole run and its parent shell.
 21. **The prompt carries a tool-call budget.** Without it, dsh pages a 4455-line file 30 lines
     per read: 35 steps and no answer at 200 s. With "at most 8 tool calls, grep instead of
     reading files over 300 lines" the same task answered in 64 s with a real finding.
@@ -169,7 +172,12 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     one executor fixes → re-run the same REPRO (exit 0 = fixed) → verify command
     green. A finding without a repro is `skipped`, and `skipped` is not `clear`
     (exit 2). No model's "looks fixed" is accepted as evidence.
-27. **`council doctor` fails on a model collision.** Three agents on one model
+27. **opencode has no effort flag, and `#variant` is rejected by the gateway**
+    (`provider.no-route: Variant unavailable for ...`). Effort on that harness is a different
+    model id (`qwen3.8-max`), selected through `overrides.opencode.model`. A configured
+    `effort` is reported in `stderr` instead of being silently dropped. A non-zero exit is a
+    failed run even when stdout holds a text event - a truncated stream is not a vote.
+28. **`council doctor` fails on a model collision.** Three agents on one model
     share blind spots, so `doctor` compares the resolved model ids and returns 1
     when fewer than three distinct ones are configured.
 
