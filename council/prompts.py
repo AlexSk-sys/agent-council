@@ -51,6 +51,9 @@ say "refactor" or "improve" without naming what changes.
 ## VERIFICATION
 The exact shell command(s) that would prove the change works, and the expected
 output. A command that cannot be run as written is not verification.
+ACCEPT: <one line: a command that exits 0 only when this task is done. It may
+fail before the change - that is expected. Use a command the council can run:
+python, py, pytest, node, npm, go, cargo, dotnet, git>
 
 ## RISKS
 What could break, and the symptom that would reveal it.

@@ -192,7 +192,16 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     the same consult in ~75 s. Reviewers only read and grep - the council runs every REPRO
     itself in the snapshot - so `review` defaults to `read_only`. `--posture shell` stays
     for manual deep runs, and `work` still promotes its one executor to `autonomous`.
-30. **`council doctor` fails on a model collision.** Three agents on one model
+30. **`work` is acceptance-first.** The planner must emit `ACCEPT: <command>` (the project
+    verify command is the fallback). The acceptance runs **after every executor pass**; its
+    failure is a blocking finding the fix round must answer. With neither an ACCEPT line nor
+    a verify command, `work` returns `clarify` (exit 2) and prints one question instead of
+    building something nobody can check.
+31. **A divergent plan is a question, not a build.** `interpretations_disagree` compares the
+    three `## INTERPRETATION` sections: if every pair shares less than a fifth of its
+    vocabulary, `work` asks which reading is meant and runs nothing. `pipeline.clarify:
+    false` disables the gate. Paraphrases share vocabulary, so the gate stays quiet on them.
+32. **`council doctor` fails on a model collision.** Three agents on one model
     share blind spots, so `doctor` compares the resolved model ids and returns 1
     when fewer than three distinct ones are configured.
 

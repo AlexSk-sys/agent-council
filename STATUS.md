@@ -17,8 +17,13 @@ One defect, one entry, and closure with proof:
    the repros. dsh's workspace-write sandbox fails every shell call on this machine, which
    cost 420-506 s per review; read-only is ~75 s for the same voice. A timeout is retried
    once at >= 600 s even when two agents already answered.
+7. `work` is **acceptance-first**: the plan must name `ACCEPT: <command>` (or the project
+   verify command), it runs after every executor pass, and a failure is a blocking finding;
+   with neither, `work` returns `clarify` (exit 2) and asks one question instead of building;
+8. if the three plans' `INTERPRETATION` sections clearly diverge, `work` asks which reading
+   is meant (`pipeline.clarify: false` disables it).
 The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are unchanged.
-185 unit tests green.
+198 unit tests green.
 
 ## Next (max 3)
 1. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the

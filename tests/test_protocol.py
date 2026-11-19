@@ -45,6 +45,7 @@ from council.protocol import (
     merge_findings,
     merge_proposals,
     needs_lean_retry,
+    parse_accept,
     parse_checks,
     parse_diff_review,
     parse_peer_reviews,
@@ -1626,6 +1627,111 @@ class TestProjectContext(unittest.TestCase):
             self.assertFalse(workdir.exists())
 
 
+class TestClarificationGate(unittest.TestCase):
+    def test_plans_that_understood_different_tasks_are_flagged(self):
+        from council.protocol import interpretations_disagree
+        proposals = {
+            "claude": "## INTERPRETATION\nAdd a retry to the HTTP client downloader.",
+            "dsh": "## INTERPRETATION\nRename the database migration folder.",
+            "opencode": "## INTERPRETATION\nMake the landing page background blue.",
+        }
+        self.assertTrue(interpretations_disagree(proposals))
+
+    def test_paraphrases_do_not_trigger_a_question(self):
+        from council.protocol import interpretations_disagree
+        proposals = {
+            "claude": "## INTERPRETATION\nThe user wants the downloader retried on failure.",
+            "dsh": "## INTERPRETATION\nThe downloader should retry after a failed request.",
+            "opencode": "## INTERPRETATION\nRetry the downloader when a request fails.",
+        }
+        self.assertFalse(interpretations_disagree(proposals))
+
+    def test_work_asks_which_reading_is_meant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(json.dumps({
+                "pipeline": {"verify": True, "cross": False, "isolate": False,
+                             "lessons": False, "impact": False, "docs": False},
+            }), encoding="utf-8")
+            proposals = {
+                "claude": "## INTERPRETATION\nAdd a retry to the HTTP downloader.",
+                "dsh": "## INTERPRETATION\nRename the database migration folder.",
+                "opencode": "## INTERPRETATION\nMake the landing page blue.",
+            }
+            approved = ([], proposals, [], "approve", "claude", [], [])
+            with mock.patch("council.project.run_verify", return_value=[]), \
+                 mock.patch("council.protocol._plan_phase", return_value=approved), \
+                 mock.patch("council.protocol.run_agent") as agent:
+                out = run_work_loop(root, "do the thing")
+            agent.assert_not_called()
+            self.assertEqual(out.decision, "clarify")
+            text = (out.run_dir / "synthesis.md").read_text(encoding="utf-8")
+            self.assertIn("understood the task differently", text)
+
+
+class TestAcceptanceFirst(unittest.TestCase):
+    def test_parse_accept_extracts_a_runnable_command(self):
+        text = '## VERIFICATION\nACCEPT: py -3 -c "raise SystemExit(0)"\n'
+        self.assertEqual(parse_accept(text), 'py -3 -c "raise SystemExit(0)"')
+        self.assertEqual(parse_accept("no acceptance here"), "")
+        self.assertEqual(parse_accept("ACCEPT: rm -rf /"), "",
+                         "an acceptance command must pass the repro allowlist")
+
+    def test_work_asks_instead_of_pretending_when_nothing_can_prove_done(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(json.dumps({
+                "pipeline": {"verify": True, "cross": False, "isolate": False,
+                             "lessons": False, "impact": False, "docs": False},
+            }), encoding="utf-8")
+            approved = ([], {"claude": "just do it"}, [], "approve", "claude", [], [])
+            with mock.patch("council.project.run_verify", return_value=[]), \
+                 mock.patch("council.protocol._plan_phase", return_value=approved), \
+                 mock.patch("council.protocol.run_agent") as agent:
+                out = run_work_loop(root, "do it")
+            agent.assert_not_called()
+            self.assertEqual(out.decision, "clarify")
+            self.assertEqual(out.exit_code, 2)
+            text = (out.run_dir / "synthesis.md").read_text(encoding="utf-8")
+            self.assertIn("## QUESTION", text)
+            self.assertIn("exit 0 when this task is done", text)
+
+    def test_the_plan_acceptance_is_used_as_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                            "commit", "-qm", "init"], cwd=root, check=True)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(json.dumps({
+                "pipeline": {"verify": False, "cross": False, "isolate": False,
+                             "lessons": False, "impact": False, "docs": False},
+            }), encoding="utf-8")
+            plan = '## PLAN\n1. x\n## VERIFICATION\nACCEPT: py -3 -c "raise SystemExit(0)"'
+            approved = ([], {"claude": plan}, [], "approve", "claude", [], [])
+            seen: list = []
+
+            def fake_verify(_project, commands=None):
+                seen.append(commands)
+                return []
+
+            def fake_agent(agent, _prompt, cwd, _cfg):
+                (Path(cwd) / "a.py").write_text("x = 2\n", encoding="utf-8")
+                return AgentResult(agent=agent, ok=True, text="## CHANGED\n- a.py")
+
+            with mock.patch("council.project.run_verify", side_effect=fake_verify), \
+                 mock.patch("council.protocol._plan_phase", return_value=approved), \
+                 mock.patch("council.protocol.run_agent", side_effect=fake_agent):
+                out = run_work_loop(root, "do it", max_rounds=0)
+            self.assertIn(['py -3 -c "raise SystemExit(0)"'], seen,
+                          "the acceptance command was never executed")
+            self.assertIn("**Acceptance:**", out.synthesis)
+
+
 class TestWorkPipeline(unittest.TestCase):
     def test_work_aborts_before_models_when_verify_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1666,7 +1772,7 @@ class TestWorkPipeline(unittest.TestCase):
             }), encoding="utf-8")
             calls = {"verify": 0}
 
-            def fake_verify(_project):
+            def fake_verify(_project, commands=None):
                 calls["verify"] += 1
                 if calls["verify"] == 1:
                     return [{"command": "t", "code": 0, "output": "pass"}]

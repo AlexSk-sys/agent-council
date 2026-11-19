@@ -323,6 +323,50 @@ class CouncilOutcome:
 # --------------------------------------------------------------------------
 
 
+_ACCEPT_RE = re.compile(r"^\s*ACCEPT:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
+
+
+def _section(text: str, heading: str) -> str:
+    match = re.search(rf"^##\s*{heading}\s*$(.*?)(?=^##\s|\Z)", text or "",
+                      re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def interpretations_disagree(proposals: dict[str, str]) -> bool:
+    """True when the plans clearly understood the task differently.
+
+    Uses the INTERPRETATION sections the planner prompt already requires. A
+    conservative rule: every pair of interpretations must share less than a
+    fifth of its vocabulary, so paraphrases do not trigger a question. An
+    ambiguous request is cheaper to clarify than to build wrong.
+    """
+    texts = [t for t in (_section(text, "INTERPRETATION")
+                         for text in proposals.values()) if t]
+    if len(texts) < 2:
+        return False
+    words = [_content_words(t) for t in texts]
+    for i in range(len(words)):
+        for j in range(i + 1, len(words)):
+            if not words[i] or not words[j]:
+                continue
+            if len(words[i] & words[j]) / min(len(words[i]), len(words[j])) >= 0.2:
+                return False
+    return True
+
+
+def parse_accept(text: str) -> str:
+    """The plan's own acceptance command: exits 0 only when the task is done.
+
+    Without one there is no way to tell "done" from "the model says done", so
+    `work` refuses to execute and asks the user instead.
+    """
+    match = _ACCEPT_RE.search(text or "")
+    if not match:
+        return ""
+    command = match.group(1).strip().strip("`").strip()
+    return command if project_mod.repro_allowed(command) else ""
+
+
 def finding_key(f: Finding) -> str:
     """The root cause, not the wording: `file:line` when the peer named one.
 
@@ -1317,7 +1361,43 @@ def run_work_loop(
         return CouncilOutcome("work", "block", findings, reviews, results, store.dir, synthesis,
                               _short("block", "no plan survived review; nothing executed"))
 
+    if options.get("clarify", True) and interpretations_disagree(proposals):
+        shown = "\n".join(
+            f"- **{name}:** {_section(text, 'INTERPRETATION')[:300]}"
+            for name, text in sorted(proposals.items())
+        )
+        question = ("The three plans understood the task differently. Which reading is "
+                    f"the one you want?\n{shown}")
+        synthesis = render_work_synthesis(task, "(not started)", proposals, [],
+                                          [], "", "clarify")
+        store.write("synthesis.md", synthesis + "\n\n## QUESTION\n" + question + "\n")
+        store.log({"event": "synthesis", "decision": "clarify", "question": question})
+        return CouncilOutcome("work", "clarify", [], reviews, results, store.dir,
+                              synthesis, _short("clarify", question[:120]))
+
     executor = recommended
+    # Acceptance-first: a command that exits 0 only when the task is done.
+    # The plan proposes it; the project verify command is the fallback. With
+    # neither, "done" would be whatever the model says, so ask instead.
+    accept = parse_accept(proposals.get(executor, ""))
+    if not accept:
+        accept = next((parse_accept(text) for text in proposals.values()
+                       if parse_accept(text)), "")
+    if not accept:
+        accept = next((r.get("command") for r in verify_results
+                       if r.get("code") == 0 and r.get("command")), "")
+    if not accept:
+        question = ("No acceptance check: the plans proposed no ACCEPT command and the "
+                    "project has no verify command. What command should exit 0 when this "
+                    "task is done?")
+        synthesis = render_work_synthesis(task, "(not started)", proposals, [],
+                                          [], "", "clarify")
+        store.write("synthesis.md", synthesis + "\n\n## QUESTION\n" + question + "\n")
+        store.log({"event": "synthesis", "decision": "clarify", "question": question})
+        return CouncilOutcome("work", "clarify", [], reviews, results, store.dir,
+                              synthesis, _short("clarify", question[:120]))
+    store.log({"event": "acceptance", "command": accept})
+
     exec_override = dict(overrides.get(executor) or {})
     exec_override["posture"] = "autonomous"
     exec_cfg = _configs([executor], {executor: exec_override}, "autonomous")[executor]
@@ -1357,6 +1437,9 @@ def run_work_loop(
         # Re-run verify after every executor pass: the earlier PASS describes
         # code that no longer exists.
         round_verify = project_mod.run_verify(project) if options.get("verify") else []
+        # The task's own acceptance runs after every executor pass; its failure
+        # is a blocking finding the fix round has to answer.
+        round_verify = round_verify + project_mod.run_verify(project, [accept])
         verify_text = prompts.render_verify(round_verify)
         round_findings: list[Finding] = []
         for res in round_verify:
@@ -1429,6 +1512,7 @@ def run_work_loop(
         project_mod.append_lessons(project, remaining, store.run_id)
     synthesis = render_work_synthesis(task, executor, proposals, changelog, remaining,
                                       final_stat, decision_out)
+    synthesis += f"\n\n**Acceptance:** `{accept}`"
     store.write("synthesis.md", synthesis)
     store.log({"event": "synthesis", "decision": decision_out,
                "remaining": [f.to_dict() for f in remaining]})
