@@ -345,24 +345,49 @@ def _merge_status(current: str, incoming: str) -> str:
     return incoming if rank.get(incoming, 0) > rank.get(current, 0) else current
 
 
+_WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in _WORD.findall((text or "").lower()) if len(w) > 3}
+
+
+def _same_cause(a: Finding, b: Finding) -> bool:
+    """Same location is necessary, not sufficient.
+
+    Two defects can live on one line. Wording decides: peers describing one
+    defect share most of their content words; `i1` and `i2` do not. When the
+    wording is too thin to tell, two different repros mean two defects.
+    """
+    if a.file != b.file or a.line != b.line:
+        return False
+    wa, wb = _content_words(a.issue), _content_words(b.issue)
+    if wa and wb and len(wa & wb) / min(len(wa), len(wb)) >= 0.6:
+        return True
+    if a.repro and b.repro and a.repro != b.repro:
+        return False
+    # No shared wording and no conflicting repros: identical text is the same
+    # defect; anything else on that line is a second one.
+    return " ".join(_WORD.findall(a.issue.lower())) == " ".join(_WORD.findall(b.issue.lower()))
+
+
 def merge_findings(findings: list[Finding]) -> list[Finding]:
     """Collapse duplicates by root cause, keeping the strongest evidence.
 
     The merged entry reports every peer that found it (`dsh+opencode`) and the
     best repro output, so nothing a peer proved is lost - only the repeated
-    lines are.
+    lines are. Findings at one location with unrelated wording stay separate.
     """
-    merged: dict[str, Finding] = {}
+    merged: list[Finding] = []
     for f in findings:
-        key = finding_key(f)
-        first = merged.get(key)
+        first = next((m for m in merged if _same_cause(m, f)), None)
         if first is None:
-            merged[key] = Finding(
+            merged.append(Finding(
                 severity=f.severity, issue=f.issue, evidence=f.evidence,
                 source=f.source, file=f.file, line=f.line, fix=f.fix,
                 repro=f.repro, repro_output=f.repro_output, status=f.status,
                 checks=list(f.checks), extra_repros=list(f.extra_repros),
-            )
+            ))
             continue
         if SEVERITY_ORDER.get(f.severity, 9) < SEVERITY_ORDER.get(first.severity, 9):
             first.severity = f.severity
@@ -387,7 +412,7 @@ def merge_findings(findings: list[Finding]) -> list[Finding]:
         for check in f.checks:
             if check not in first.checks:
                 first.checks.append(check)
-    return list(merged.values())
+    return merged
 
 
 # --------------------------------------------------------------------------

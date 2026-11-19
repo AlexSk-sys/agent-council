@@ -6,7 +6,7 @@ they review, and in `work` mode fix, each other's output. Single package, stdlib
 
 ## Commands
 ```powershell
-py -3 -m unittest discover -s tests -v      # verify (137 tests, no network)
+py -3 -m unittest discover -s tests -v      # verify (181 tests, no network)
 py -3 -m pip install -e .                   # installs the `council` entry point
 council doctor                              # prove all 3 harnesses answer headless
 council review --path sandbox               # cross-review a diff

@@ -14,7 +14,7 @@ One defect, one entry, and closure with proof:
    is not `clear` (exit 2). `--dry-run` executes the repros only;
 5. `council doctor` fails when fewer than three distinct models are configured.
 The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are unchanged.
-168 unit tests green.
+181 unit tests green.
 
 ## Next (max 3)
 1. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the
@@ -29,6 +29,20 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
 - Nothing.
 
 ## Verified (dated evidence)
+- **2026-11-19 — the council reviewed its own fix (run `20261119-175305`): BLOCK, 2 major
+  confirmed, both fixed.**
+  1. `pending_is_news` returned True for any decision other than `advisory`, so an `approve`
+     consult with unproven findings still wrote `pending.md`; it now reports only a `block`
+     or a **new confirmed blocker/major**, and a CLI test pins the silent case.
+  2. `merge_findings` collapsed two unrelated defects on one `file:line`; location is now
+     necessary, not sufficient - wording overlap >= 0.6 (or identical text) merges,
+     otherwise separate entries. The council's own repro now prints `entries: 2 ['i1','i2']`,
+     exit 0.
+  3. `verify_repros` honours `extra_repros`: a merged entry is refuted only when every repro
+     exits 0.
+  4. The `_run` TimeoutExpired path is now tested (`_kill_tree(pid)` called, `timeout after 5s`).
+  `Ran 181 tests ... OK`. dsh timed out twice at 420 s during this review, so the verdict is
+  2 voices of 3.
 - **2026-11-19 — the two defects the council found in the new pipeline are fixed.** A no-diff
   consult no longer reaches the majority-vote rule: two block votes with no proven finding
   return `approve`, and `advisory` is reserved for a confirmed blocker/major. A merged entry

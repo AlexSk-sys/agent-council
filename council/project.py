@@ -377,25 +377,33 @@ def repro_allowed(command: str) -> bool:
 
 
 def verify_repros(cwd: Path, findings, timeout_s: int = REPRO_TIMEOUT_S) -> None:
-    """Run each finding's REPRO; non-zero exit confirms, zero refutes."""
+    """Run each finding's REPRO; non-zero exit confirms, zero refutes.
+
+    A merged entry can carry `extra_repros` (two peers, two defects, one line):
+    it is refuted only when every repro exits 0, and confirmed as soon as one
+    of them fails.
+    """
     for f in findings:
-        repro = getattr(f, "repro", "")
-        if not repro:
+        repros = [r for r in [getattr(f, "repro", "")]
+                  + list(getattr(f, "extra_repros", [])) if r]
+        if not repros:
             if not f.status:
                 f.status = "unverified"
             continue
-        if not repro_allowed(repro):
+        if any(not repro_allowed(r) for r in repros):
             f.status = "unverified"
             f.repro_output = "blocked: command not allowed"
             continue
-        res = run_command(repro, Path(cwd), timeout_s)
-        f.repro_output = res["output"][-2000:]
-        if res["code"] == 0:
-            f.status = "refuted"
-        elif res["code"] == -1:
-            f.status = "unverified"
-        else:
+        results = [run_command(r, Path(cwd), timeout_s) for r in repros]
+        codes = [res["code"] for res in results]
+        failed = next((res for res in results if res["code"] not in (0, -1)), None)
+        f.repro_output = (failed or results[0])["output"][-2000:]
+        if failed is not None:
             f.status = "confirmed"
+        elif all(code == 0 for code in codes):
+            f.status = "refuted"
+        else:
+            f.status = "unverified"
 
 
 # --------------------------------------------------------------------------

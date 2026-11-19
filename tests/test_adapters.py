@@ -30,6 +30,19 @@ class FakeProc:
         return "ok", ""
 
 
+class HangProc(FakeProc):
+    """Raises TimeoutExpired once, then returns the partial output."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def communicate(self, timeout=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise adapters.subprocess.TimeoutExpired(cmd="x", timeout=5)
+        return "partial", ""
+
+
 class TestProcessGroup(unittest.TestCase):
     def _spawn_kwargs(self, os_name: str) -> dict:
         with mock.patch.object(adapters.os, "name", os_name), \
@@ -43,6 +56,15 @@ class TestProcessGroup(unittest.TestCase):
 
     def test_windows_spawn_has_no_posix_session_flag(self):
         self.assertNotIn("start_new_session", self._spawn_kwargs("nt"))
+
+    def test_timeout_kills_the_tree_and_reports_the_deadline(self):
+        proc = HangProc()
+        with mock.patch.object(adapters.subprocess, "Popen", return_value=proc), \
+                mock.patch.object(adapters, "_kill_tree") as kill_tree:
+            finished, _elapsed, err = adapters._run(["x"], ".", 5)
+        self.assertIsNone(finished)
+        self.assertIn("timeout after 5s", err)
+        kill_tree.assert_called_once_with(4242)
 
     def test_kill_tree_targets_the_child_group_not_ours(self):
         # getpgid/killpg do not exist on Windows; create=True lets the POSIX

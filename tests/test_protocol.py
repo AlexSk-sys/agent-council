@@ -1205,18 +1205,35 @@ class TestConsultCommand(unittest.TestCase):
             root = Path(tmp)
             prompt_file = root / "msg.md"
             prompt_file.write_text("hello", encoding="utf-8")
+            finding = Finding(severity="blocker", issue="x", evidence="e",
+                              source="dsh", file="a.py", line=1, status="confirmed")
+            outcome = CouncilOutcome("consult", "block", [finding], [], [],
+                                     root / "run", "", "BLOCK: 1")
+            acquire_lock(root, "consult", "tok")
+            with mock.patch("council.cli.run_session_consult", return_value=outcome):
+                code = main(["--project", str(root), "consult",
+                             "--prompt-file", str(prompt_file),
+                             "--background", "--lock-token", "tok"])
+            self.assertEqual(code, 2)  # a blocked consult keeps the exit-2 contract
+            self.assertTrue((root / ".council" / "pending.md").exists())
+            self.assertFalse((root / ".council" / "running.json").exists())
+            state = load_state(root)
+            self.assertEqual(state["consult"]["decision"], "block")
+
+    def test_background_approve_with_nothing_new_stays_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_file = root / "msg.md"
+            prompt_file.write_text("hello", encoding="utf-8")
             outcome = CouncilOutcome("consult", "approve", [], [], [],
-                                     root / "run", "", "APPROVE: 0 blocker(s)")
+                                     root / "run", "", "APPROVE")
             acquire_lock(root, "consult", "tok")
             with mock.patch("council.cli.run_session_consult", return_value=outcome):
                 code = main(["--project", str(root), "consult",
                              "--prompt-file", str(prompt_file),
                              "--background", "--lock-token", "tok"])
             self.assertEqual(code, 0)
-            self.assertTrue((root / ".council" / "pending.md").exists())
-            self.assertFalse((root / ".council" / "running.json").exists())
-            state = load_state(root)
-            self.assertEqual(state["consult"]["decision"], "approve")
+            self.assertFalse((root / ".council" / "pending.md").exists())
 
     def test_consult_does_not_overwrite_the_diff_gate_cache(self):
         """A consult verdict is about the message, never about the diff gate."""
@@ -1670,9 +1687,12 @@ class TestRootCauseMerge(unittest.TestCase):
     def test_three_peers_on_one_line_are_one_defect(self):
         merged = merge_findings([
             self._f("dsh", status="confirmed", repro="py -3 -c \"raise SystemExit(1)\"",
-                    repro_output="exit 1"),
-            self._f("opencode", evidence="read a.py:1 again"),
-            self._f("claude", severity="blocker", issue="same line, other words"),
+                    repro_output="exit 1",
+                    issue="stress-marked words are split into two tokens by the word counter"),
+            self._f("opencode", evidence="read a.py:1 again",
+                    issue="the word counter splits stress-marked words into two tokens"),
+            self._f("claude", severity="blocker",
+                    issue="word counter splits stress-marked words into two tokens"),
         ])
         self.assertEqual(len(merged), 1)
         found = merged[0]
@@ -1699,6 +1719,16 @@ class TestRootCauseMerge(unittest.TestCase):
             self._f("claude", file="a.py", line=0, issue="second defect"),
         ])
         self.assertEqual(len(merged), 2)
+
+    def test_two_unrelated_defects_on_one_line_stay_separate(self):
+        """Same location is not the same defect (the council's own repro)."""
+        merged = merge_findings([
+            self._f("dsh", issue="crash on empty exit", status="confirmed"),
+            self._f("claude", issue="wrong severity mapping", status="confirmed"),
+        ])
+        self.assertEqual(len(merged), 2)
+        self.assertEqual({m.issue for m in merged},
+                         {"crash on empty exit", "wrong severity mapping"})
 
     def test_same_line_with_different_repros_keeps_every_repro(self):
         merged = merge_findings([
@@ -1790,6 +1820,11 @@ class TestPendingIsNews(unittest.TestCase):
                                             root / ".council" / "runs" / "run1"))
             self.assertTrue(pending_is_news(root, "block", [old],
                                             root / ".council" / "runs" / "run1"))
+            # approve/advisory with nothing proven is not a message either
+            unproven = Finding(severity="blocker", issue="z", evidence="e",
+                               source="dsh", file="a.py", line=9, status="unverified")
+            self.assertFalse(pending_is_news(root, "approve", [unproven],
+                                             root / ".council" / "runs" / "run1"))
 
 
 class TestDedupedSynthesis(unittest.TestCase):

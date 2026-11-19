@@ -694,13 +694,15 @@ def pending_is_news(project: Path, decision: str, findings, run_dir: Path) -> bo
     message: printing it on every conversational turn is what made the council
     feel like it produced a fresh pile of errors each time.
     """
-    if decision != "advisory":
+    if decision == "block":
         return True
     from .protocol import finding_key
     from .project import lesson_index
 
     known = lesson_index(project, exclude_run=run_dir.name)
-    return any(getattr(f, "status", "") == "confirmed" and finding_key(f) not in known
+    return any(getattr(f, "status", "") == "confirmed"
+               and getattr(f, "severity", "") in ("blocker", "major")
+               and finding_key(f) not in known
                for f in findings)
 
 
