@@ -339,6 +339,12 @@ class TestNeedsLeanRetry(unittest.TestCase):
                                            "opencode": "block",
                                            "dsh": "approve"}))
 
+    def test_the_cross_prompt_carries_the_tool_budget(self):
+        """Without the budget dsh pages files 30 lines at a time and dies."""
+        text = prompts.verify_findings_prompt("dsh", "p", "0. [major] x", True, "")
+        self.assertIn("budget of at most", text)
+        self.assertIn("never page through a file", text)
+
     def test_below_quorum_retries(self):
         self.assertTrue(needs_lean_retry({"claude": "approve",
                                           "opencode": "error: boom",
@@ -357,7 +363,7 @@ class TestLeanRetry(unittest.TestCase):
     def _run(self, cfgs, verdicts):
         return self._run_agents(list(cfgs), cfgs, verdicts)
 
-    def _run_agents(self, agents, cfgs, verdicts):
+    def _run_agents(self, agents, cfgs, verdicts, mode="consult"):
         from council import adapters as adapters_mod
         from council import protocol as protocol_mod
 
@@ -380,7 +386,7 @@ class TestLeanRetry(unittest.TestCase):
         with mock.patch.object(adapters_mod, "_run", side_effect=fake_run):
             protocol_mod._lean_retry(
                 store, ctx, agents, cfgs, verdicts, findings,
-                user_message="hello\nworld", diff="diff\nmore", mode="consult")
+                user_message="hello\nworld", diff="diff\nmore", mode=mode)
         return captured
 
     def test_retry_keeps_prompt_dir_model_and_arrays(self):
@@ -390,7 +396,7 @@ class TestLeanRetry(unittest.TestCase):
             captured = self._run(cfgs, {"claude": "timeout"})
             self.assertEqual(len(captured), 1, "lean retry did not call the agent")
             args, timeout_s = captured[0]
-            self.assertEqual(timeout_s, 600, "a timed-out voice needs more time, not less")
+            self.assertEqual(timeout_s, 240, "a consult retry stays a quick side-opinion")
             self.assertIn("--model", args)
             self.assertIn("m1", args)
             self.assertIn("--x", args)
@@ -402,6 +408,15 @@ class TestLeanRetry(unittest.TestCase):
             body = files[0].read_text(encoding="utf-8")
             self.assertIn("hello", body)
             self.assertIn("diff", body)
+
+    def test_a_review_retry_gets_at_least_600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfgs = {"dsh": AgentConfig(name="dsh", prompt_dir=tmp,
+                                       model="m", timeout_s=420)}
+            captured = self._run_agents(list(cfgs), cfgs, {"dsh": "timeout"},
+                                        mode="review")
+            self.assertEqual(captured[0][1], 600,
+                             "a timed-out voice needs more time, not less")
 
     def test_only_failed_agents_are_retried(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -613,6 +628,20 @@ class TestHooks(unittest.TestCase):
              mock.patch("council.hooks.subprocess.Popen"):
             _spawn_review(Path(tmp))
             self.assertTrue((Path(tmp) / ".council" / "background.log").exists())
+
+    def test_a_system_notification_does_not_spawn_a_consult(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = json.dumps({
+                "prompt": "[SYSTEM NOTIFICATION - NOT USER INPUT] background task done",
+                "transcript_path": "",
+            })
+            with mock.patch("sys.stdin", io.StringIO(payload)), \
+                    mock.patch("council.hooks._spawn_consult") as spawn, \
+                    mock.patch("council.hooks.council_busy", return_value=False):
+                prompt_hook(root)
+            spawn.assert_not_called()
+            self.assertFalse((root / ".council" / "inbox").exists())
 
     def test_prompt_hook_prints_once_then_clears(self):
         with tempfile.TemporaryDirectory() as tmp:

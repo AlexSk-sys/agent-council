@@ -619,6 +619,20 @@ def drain_queue(project: Path, max_run_s: float = MAX_RUN_S) -> bool:
     return True
 
 
+SYSTEM_MARKERS = (
+    "[system notification",
+    "<task-notification",
+    "[background task",
+    "this is an automated background-task event",
+)
+
+
+def _is_system_message(message: str) -> bool:
+    head = message.lstrip()[:300].lower()
+    return any(head.startswith(marker) or marker in head
+               for marker in SYSTEM_MARKERS)
+
+
 def prompt_hook(project: Path, cooldown_s: float = DEFAULT_PROMPT_COOLDOWN_S,
                 max_run_s: float = MAX_RUN_S) -> int:
     """Bring all three agents into the session as soon as the user writes.
@@ -637,6 +651,10 @@ def prompt_hook(project: Path, cooldown_s: float = DEFAULT_PROMPT_COOLDOWN_S,
 
     message = str(payload.get("prompt") or "").strip()
     if not message:
+        return 0
+    if _is_system_message(message):
+        # A background-task completion is not a question. Spawning three models
+        # for it burned a consult per notification and kept the lock busy.
         return 0
     if council_busy(base, max_run_s):
         _queue_prompt(base, message, payload.get("transcript_path"))
