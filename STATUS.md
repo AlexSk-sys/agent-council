@@ -6,9 +6,10 @@ One defect, one entry, and closure with proof:
    (real run: 17 findings -> 14 entries -> 9 confirmed blocker/major);
 2. findings already in `.council/checklist.md` render under **Known open**, the count reads
    "N new, M known open", and a known defect vetoes only a diff that touches its file;
-3. a consult with **no diff** is `ADVISORY` (exit 0) and `pending_is_news` suppresses the
-   message entirely when it would only repeat the checklist — a question no longer returns as
-   a pile of "new errors"; the Stop review with a diff is still the gate;
+3. a consult with **no diff** is `ADVISORY` (exit 0), runs **one round** (no cross), and
+   `pending_is_news` suppresses the message entirely when it would only repeat the
+   checklist — a question no longer returns as a pile of "new errors"; the Stop review with
+   a diff is still the gate;
 4. `council drain` closes confirmed findings only when their own REPRO flips non-zero -> zero
    and the verify command stays green; a finding without a repro is `skipped`, and `skipped`
    is not `clear` (exit 2). `--dry-run` executes the repros only;
