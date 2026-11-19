@@ -171,9 +171,19 @@ def _review(project: Path, args: argparse.Namespace) -> int:
 
     print(f"council review: {len(agents)} agents, {len(diff)} chars of diff", file=sys.stderr)
     trigger = "stop" if getattr(args, "background", False) else "manual"
+
+    def provisional(decision, findings, run_dir):
+        # Deliver the round-1 verdict while the cross round is still running;
+        # the final verdict overwrites it below, and the label says which is
+        # which. Only background runs write pending at all.
+        if args.background and pending_is_news(project, decision, findings, run_dir):
+            write_pending(project, decision, findings, run_dir,
+                          mode="review (provisional)")
+
     out = run_diff_review(project, diff, stat, agents, overrides, on_done=_progress,
                           posture=args.posture, trigger=trigger,
-                          tier_override=getattr(args, "tier", None))
+                          tier_override=getattr(args, "tier", None),
+                          on_provisional=provisional)
 
     state = load_state(project)
     state[scope] = {"fingerprint": fp, "decision": out.decision,
@@ -231,10 +241,16 @@ def _consult(project: Path, args: argparse.Namespace) -> int:
     overrides = _load_overrides(project)
     print(f"council consult: {len(agents)} agents, prompt {len(message)} chars, "
           f"transcript {len(transcript)} chars, diff {len(diff)} chars", file=sys.stderr)
+    def provisional(decision, findings, run_dir):
+        if args.background and pending_is_news(project, decision, findings, run_dir):
+            write_pending(project, decision, findings, run_dir,
+                          mode="consult (provisional)")
+
     out = run_session_consult(project, message, transcript, diff, stat, git_state,
                               agents, overrides, on_done=_progress,
                               max_chars=args.max_chars,
-                              tier_override=getattr(args, "tier", None))
+                              tier_override=getattr(args, "tier", None),
+                              on_provisional=provisional)
 
     if args.background and pending_is_news(project, out.decision, out.findings,
                                            out.run_dir):

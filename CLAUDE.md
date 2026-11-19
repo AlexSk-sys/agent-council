@@ -203,7 +203,13 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     three `## INTERPRETATION` sections: if every pair shares less than a fifth of its
     vocabulary, `work` asks which reading is meant and runs nothing. `pipeline.clarify:
     false` disables the gate. Paraphrases share vocabulary, so the gate stays quiet on them.
-32. **`council doctor` fails on a model collision.** Three agents on one model
+32. **The round-1 verdict is delivered before the cross round.** `_finalize_review` calls
+    `on_provisional(decision, findings, run_dir)` after the repros and before
+    `_cross_round`; the CLI writes `pending.md` with mode `review (provisional)` /
+    `consult (provisional)`, and the final verdict overwrites it when cross finishes. A
+    user who types while cross is still running reads the labelled provisional verdict
+    instead of waiting for the whole run.
+33. **`council doctor` fails on a model collision.** Three agents on one model
     share blind spots, so `doctor` compares the resolved model ids and returns 1
     when fewer than three distinct ones are configured.
 

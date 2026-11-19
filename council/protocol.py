@@ -303,7 +303,9 @@ class PeerReview:
 @dataclass
 class CouncilOutcome:
     mode: str
-    decision: str  # "approve" | "block" | "error"
+    decision: str  # "approve" | "block" | "error" | "advisory" | "clarify"
+    # advisory: a consult with confirmed findings but no change to veto (exit 0)
+    # clarify:  work refused to execute and asked one question (exit 2)
     findings: list[Finding]
     reviews: list[PeerReview]
     results: list[AgentResult]
@@ -363,7 +365,17 @@ def parse_accept(text: str) -> str:
     match = _ACCEPT_RE.search(text or "")
     if not match:
         return ""
-    command = match.group(1).strip().strip("`").strip()
+    command = match.group(1).strip()
+    # Models annotate the line: "`pytest -q x` (must pass)". Take the quoted
+    # command when there is one, else cut the trailing prose - otherwise the
+    # annotation becomes part of the command and fails a correct change.
+    quoted = re.search(r"`([^`]+)`", command)
+    if quoted:
+        command = quoted.group(1).strip()
+    else:
+        command = re.split(r"\s+\((?:must|should|expected|it|this)\b", command,
+                           maxsplit=1, flags=re.IGNORECASE)[0]
+    command = command.strip().strip("`").rstrip(".").strip()
     return command if project_mod.repro_allowed(command) else ""
 
 
@@ -1102,19 +1114,30 @@ def decide_consult(verdicts: dict[str, str], findings: list[Finding],
 def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
                      findings: list[Finding], agents: list[str],
                      cfgs: dict[str, AgentConfig], on_done, *,
-                     consult: bool = False, has_diff: bool = False):
+                     consult: bool = False, has_diff: bool = False,
+                     on_provisional=None):
     # One defect, one entry - merged BEFORE the repros run, so a merged entry
     # carries every peer's repro and `verify_repros` can require all of them.
     findings[:] = merge_findings(findings)
     project_mod.verify_repros(ctx.workdir, findings)
+    known = (project_mod.lesson_index(ctx.project, exclude_run=store.run_id)
+             if ctx.options.get("lessons") else {})
+    changed = set(project_mod.changed_paths(ctx.project))
+    if on_provisional is not None:
+        # Hand over the round-1 verdict now; the cross round below can take
+        # minutes and only sharpens it. The caller labels it provisional and
+        # overwrites it with the final verdict.
+        try:
+            provisional = (decide_consult(verdicts, findings, known, has_diff, changed)
+                           if consult else decide_review(verdicts, findings, known, changed))
+            on_provisional(provisional, findings, store.dir)
+        except Exception:
+            pass
     before = len(findings)
     cross_results = _cross_round(store, ctx, agents, cfgs, findings, on_done)
     fresh = merge_findings(findings[before:])
     project_mod.verify_repros(ctx.workdir, fresh)
     findings[:] = merge_findings(findings[:before] + fresh)
-    known = (project_mod.lesson_index(ctx.project, exclude_run=store.run_id)
-             if ctx.options.get("lessons") else {})
-    changed = set(project_mod.changed_paths(ctx.project))
     if consult:
         decision = decide_consult(verdicts, findings, known, has_diff, changed)
     else:
@@ -1429,18 +1452,29 @@ def run_work_loop(
     last_verdicts: dict[str, str] = {}
     for round_no in range(max_rounds + 1):
         diff, stat = collect_diff(project)
+        # The task's own acceptance is checked even when the executor changed
+        # nothing: a no-op that leaves the acceptance failing is a blocker,
+        # not an approval.
+        accept_results = project_mod.run_verify(project, [accept])
+        accept_findings = [
+            Finding(severity="blocker",
+                    issue=f"acceptance command failed: {accept}",
+                    evidence=(res.get("output") or "no output")[-800:],
+                    source="accept", status="confirmed")
+            for res in accept_results if res.get("code") != 0
+        ]
         if not diff.strip():
-            store.log({"event": "empty_diff", "round": round_no})
+            store.log({"event": "empty_diff", "round": round_no,
+                       "acceptance_failed": len(accept_findings)})
+            remaining = accept_findings
+            last_verdicts = {"accept": "block" if accept_findings else "approve"}
             break
         store.write(f"r4/diff-{round_no}.patch", diff)
 
         # Re-run verify after every executor pass: the earlier PASS describes
         # code that no longer exists.
         round_verify = project_mod.run_verify(project) if options.get("verify") else []
-        # The task's own acceptance runs after every executor pass; its failure
-        # is a blocking finding the fix round has to answer.
-        round_verify = round_verify + project_mod.run_verify(project, [accept])
-        verify_text = prompts.render_verify(round_verify)
+        verify_text = prompts.render_verify(round_verify + accept_results)
         round_findings: list[Finding] = []
         for res in round_verify:
             if res.get("code") != 0:
@@ -1450,6 +1484,7 @@ def run_work_loop(
                     evidence=(res.get("output") or "no output")[-800:],
                     source="verify", status="confirmed",
                 ))
+        round_findings.extend(accept_findings)
 
         review_calls = {
             a: (prompts.review_diff_prompt(a, str(project), diff,
@@ -1474,7 +1509,12 @@ def run_work_loop(
             round_findings.extend(parsed)
 
         _verify_repros_isolated(project, round_findings)
-        round_findings = merge_findings(round_findings)
+        # Deterministic failures are never duplicates of each other: two
+        # different commands failing are two facts, not one defect.
+        deterministic = [f for f in round_findings
+                         if f.source in ("verify", "accept")]
+        round_findings = deterministic + merge_findings(
+            [f for f in round_findings if f.source not in ("verify", "accept")])
         blocking = [f for f in round_findings if f.blocks]
         remaining = blocking
         last_verdicts = dict(verdicts)
@@ -1534,11 +1574,12 @@ def render_work_synthesis(task: str, executor: str, proposals: dict[str, str],
                           diff_stat: str, decision: str) -> str:
     lines = ["# Council work", "", f"**Task:** {task}", f"**Executor:** {executor}", ""]
     lines += ["## Verdict", ""]
-    lines.append(
-        "**DONE** - no proven blocker or major finding remains."
-        if decision == "approve"
-        else f"**STOPPED** - {len(remaining)} proven finding(s) remain."
-    )
+    if decision == "approve":
+        lines.append("**DONE** - the acceptance command exits 0 and nothing proven remains.")
+    elif decision == "clarify":
+        lines.append("**CLARIFY** - nothing was executed; one question is waiting below.")
+    else:
+        lines.append(f"**STOPPED** - {len(remaining)} proven finding(s) remain.")
     lines += ["", f"**Changed:** {_trim_stat(diff_stat)}", ""]
     lines += ["## What the executor did", ""]
     for i, entry in enumerate(changelog, 1):
@@ -1565,6 +1606,7 @@ def run_diff_review(
     posture: str = "read_only",
     trigger: str = "manual",
     tier_override: str | None = None,
+    on_provisional=None,
 ) -> CouncilOutcome:
     project = Path(project).resolve()
     agents = agents or list(AGENTS)
@@ -1627,7 +1669,8 @@ def run_diff_review(
                                   _short("error", "not enough agents answered"))
 
         cross_results, decision, _, known = _finalize_review(
-            store, ctx, verdicts, findings, agents, cfgs, on_done)
+            store, ctx, verdicts, findings, agents, cfgs, on_done,
+            on_provisional=on_provisional)
         results = results + cross_results
         synthesis = render_diff_synthesis(decision, verdicts, findings, diff_stat,
                                           ctx.isolation, stamp, known)
@@ -1659,6 +1702,7 @@ def run_session_consult(
     posture: str = "read_only",
     max_chars: int = 60000,
     tier_override: str | None = None,
+    on_provisional=None,
 ) -> CouncilOutcome:
     """All three agents join a live session the moment the user writes.
 
@@ -1741,7 +1785,8 @@ def run_session_consult(
 
         cross_results, decision, _, known = _finalize_review(
             store, ctx, verdicts, findings, agents, cfgs, on_done,
-            consult=True, has_diff=bool(diff.strip()))
+            consult=True, has_diff=bool(diff.strip()),
+            on_provisional=on_provisional)
         results = results + cross_results
         synthesis = render_consult_synthesis(decision, verdicts, findings,
                                              user_message, diff_stat, ctx.isolation, stamp,

@@ -32,8 +32,9 @@ REPRO_TOKENS = {
 }
 REPRO_DENY = (
     "rm -rf", "rm -fr", "del /s", "rd /s", "format ", "shutdown", "git push",
-    "git reset --hard", "git clean", "curl ", "wget ", "invoke-webrequest",
-    "start-process", "reg delete", "takeown", "icacls",
+    "git reset --hard", "git clean", "git commit", "git stash", "git checkout --",
+    "curl ", "wget ", "invoke-webrequest", "start-process", "reg delete",
+    "takeown", "icacls",
 )
 
 

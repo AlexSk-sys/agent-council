@@ -21,9 +21,11 @@ One defect, one entry, and closure with proof:
    verify command), it runs after every executor pass, and a failure is a blocking finding;
    with neither, `work` returns `clarify` (exit 2) and asks one question instead of building;
 8. if the three plans' `INTERPRETATION` sections clearly diverge, `work` asks which reading
-   is meant (`pipeline.clarify: false` disables it).
+   is meant (`pipeline.clarify: false` disables it);
+9. the round-1 verdict is written to `pending.md` as **provisional** before the cross round
+   starts, and the final verdict overwrites it — a first opinion no longer waits for cross.
 The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are unchanged.
-198 unit tests green.
+200 unit tests green.
 
 ## Next (max 3)
 1. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the

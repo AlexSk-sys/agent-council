@@ -13,10 +13,10 @@ finding without evidence is discarded with its author named.
 | command | what happens | exit code |
 |---|---|---|
 | `council review [--staged\|--diff REF\|--path P]` | three agents attack the actual diff in parallel; proven blockers stop the change | 0 approve, 2 block |
-| `council work "<task>"` | three plans → cross-review → one executor writes → the other two verify → executor fixes → re-verify | 0 done, 2 findings remain, 1 error |
+| `council work "<task>"` | three plans → cross-review → one executor writes → the other two verify → executor fixes → re-verify; the plan's `ACCEPT:` command must exit 0 | 0 done, 2 findings remain or a **clarify** question is waiting, 1 error |
 | `council task "<task>"` | plan only: three proposals, cross-reviewed, deterministic vote | 0, 2, 1 |
 | `council ask --to dsh "<question>"` | one peer question | 0/1 |
-| `council consult --prompt-file F` | three agents join a live session: the user's message, the transcript tail and the uncommitted diff | 0 approve, 2 block |
+| `council consult --prompt-file F` | three agents join a live session: the user's message, the transcript tail and the uncommitted diff | 0 approve/advisory, 2 block when a diff is under review |
 | `council status` | last run in this project | |
 | `council doctor` | prove all three harnesses answer headless | |
 | `council init [--hook]` | `.council/` config, gitignore, optional pre-commit gate | |

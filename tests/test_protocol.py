@@ -911,6 +911,27 @@ class TestSessionConsult(unittest.TestCase):
             self.assertEqual(out.decision, "block")
             self.assertEqual(out.findings[0].status, "confirmed")
 
+    def test_a_provisional_verdict_arrives_before_the_cross_round(self):
+        seen: list[tuple] = []
+
+        def on_provisional(decision, findings, run_dir):
+            seen.append((decision, len(findings), Path(run_dir).name))
+
+        texts = {"dsh": "VERDICT: BLOCK\n"
+                        "FINDING: major | a.py:1 | boom | read a.py:1\n"
+                        "REPRO: python -c \"raise SystemExit(1)\""}
+        checks = {"claude": "CHECK: 0 | CONFIRM | read a.py:1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._force_cross(root)
+            with mock.patch("council.protocol.run_agent",
+                            side_effect=self._fake(texts, checks)):
+                out = run_session_consult(root, "hello", on_provisional=on_provisional)
+            self.assertEqual(len(seen), 1, "one provisional verdict, then the final one")
+            self.assertEqual(seen[0][0], "advisory",
+                             "the round-1 verdict is handed over before cross runs")
+            self.assertTrue((out.run_dir / "r2").exists(), "the cross round did run")
+
     def test_consult_without_a_diff_is_advisory_not_a_veto(self):
         """A question about untouched code must not come back as a blocker."""
         texts = {"dsh": "VERDICT: BLOCK\n"
@@ -1668,6 +1689,7 @@ class TestClarificationGate(unittest.TestCase):
             self.assertEqual(out.decision, "clarify")
             text = (out.run_dir / "synthesis.md").read_text(encoding="utf-8")
             self.assertIn("understood the task differently", text)
+            self.assertIn("**CLARIFY**", text)
 
 
 class TestAcceptanceFirst(unittest.TestCase):
@@ -1677,6 +1699,10 @@ class TestAcceptanceFirst(unittest.TestCase):
         self.assertEqual(parse_accept("no acceptance here"), "")
         self.assertEqual(parse_accept("ACCEPT: rm -rf /"), "",
                          "an acceptance command must pass the repro allowlist")
+        self.assertEqual(parse_accept("ACCEPT: `pytest -q tests/x.py` (must pass)"),
+                         "pytest -q tests/x.py")
+        self.assertEqual(parse_accept('ACCEPT: py -3 -c "print(1)" (expected 1)'),
+                         'py -3 -c "print(1)"')
 
     def test_work_asks_instead_of_pretending_when_nothing_can_prove_done(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1697,6 +1723,36 @@ class TestAcceptanceFirst(unittest.TestCase):
             text = (out.run_dir / "synthesis.md").read_text(encoding="utf-8")
             self.assertIn("## QUESTION", text)
             self.assertIn("exit 0 when this task is done", text)
+
+    def test_a_noop_execution_still_runs_the_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                            "commit", "-qm", "init"], cwd=root, check=True)
+            (root / ".council").mkdir()
+            (root / ".council" / "config.json").write_text(json.dumps({
+                "pipeline": {"verify": True, "cross": False, "isolate": False,
+                             "lessons": False, "impact": False, "docs": False},
+            }), encoding="utf-8")
+
+            def fake_verify(_project, commands=None):
+                if commands:
+                    return [{"command": commands[0], "code": 1,
+                             "output": "task not done"}]
+                return [{"command": "project-verify", "code": 0, "output": "pass"}]
+
+            approved = ([], {"claude": "plan"}, [], "approve", "claude", [], [])
+            with mock.patch("council.project.run_verify", side_effect=fake_verify), \
+                 mock.patch("council.protocol._plan_phase", return_value=approved), \
+                 mock.patch("council.protocol.run_agent",
+                            return_value=AgentResult(agent="claude", ok=True,
+                                                     text="## CHANGED\n- nothing")):
+                out = run_work_loop(root, "do it", max_rounds=0)
+            self.assertEqual(out.decision, "block")
+            self.assertEqual(out.findings[0].source, "accept")
 
     def test_the_plan_acceptance_is_used_as_the_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1755,7 +1811,8 @@ class TestWorkPipeline(unittest.TestCase):
             subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=a",
                             "commit", "-qm", "init"], cwd=root, check=True)
             (root / "a.txt").write_text("dirty\n", encoding="utf-8")
-            finding = Finding("major", "x", "e", "dsh", repro="git checkout -- .")
+            finding = Finding("major", "x", "e", "dsh",
+                              repro='py -3 -c "import pathlib;pathlib.Path(\'a.txt\').write_text(\'x\')"')
             _verify_repros_isolated(root, [finding])
             self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "dirty\n")
             self.assertEqual(finding.status, "refuted")
