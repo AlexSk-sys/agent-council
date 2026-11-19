@@ -1470,7 +1470,11 @@ def run_diff_review(
     agents: list[str] | None = None,
     overrides: dict[str, dict] | None = None,
     on_done=None,
-    posture: str = "shell",
+    # Read-only by default: reviewers read and grep, and the council runs
+    # every REPRO itself. dsh's workspace-write sandbox fails each shell call
+    # on this machine ("windows-acl temp grant materialization failed"), which
+    # cost 420 s per review while it produced nothing.
+    posture: str = "read_only",
     trigger: str = "manual",
     tier_override: str | None = None,
 ) -> CouncilOutcome:

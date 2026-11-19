@@ -575,8 +575,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--agents", help="comma-separated subset")
     r.add_argument("--max-chars", type=int, default=30000)
     r.add_argument("--json", action="store_true")
-    r.add_argument("--posture", choices=POSTURES, default="shell",
-                   help="read_only | shell (run commands, no edits) | autonomous (full)")
+    r.add_argument("--posture", choices=POSTURES, default="read_only",
+                   help="read_only (default: fast, the council runs the repros) | "
+                        "shell (reviewers may run commands) | autonomous (full)")
     r.add_argument("--if-changed", action="store_true",
                    help="reuse the last verdict when the diff is byte-identical")
     r.add_argument("--background", action="store_true",

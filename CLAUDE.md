@@ -185,7 +185,14 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     at `max(timeout, 600)` on a prompt without impact/docs/lessons. The old 240 s retry
     was a second guaranteed loss for the slowest harness. The cross-round prompt now
     carries the tool budget too - it was the only template without it.
-29. **`council doctor` fails on a model collision.** Three agents on one model
+29. **Review is read-only by default, and that is a speed fix, not a depth cut.** dsh's
+    `workspace-write` sandbox fails every shell call on this machine
+    (`sandbox-local windows-acl temp grant materialization failed`). A shell review spent
+    420 s and a 600 s probe spent 506 s failing at sandbox setup; in read-only dsh answers
+    the same consult in ~75 s. Reviewers only read and grep - the council runs every REPRO
+    itself in the snapshot - so `review` defaults to `read_only`. `--posture shell` stays
+    for manual deep runs, and `work` still promotes its one executor to `autonomous`.
+30. **`council doctor` fails on a model collision.** Three agents on one model
     share blind spots, so `doctor` compares the resolved model ids and returns 1
     when fewer than three distinct ones are configured.
 

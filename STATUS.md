@@ -12,9 +12,13 @@ One defect, one entry, and closure with proof:
 4. `council drain` closes confirmed findings only when their own REPRO flips non-zero -> zero
    and the verify command stays green; a finding without a repro is `skipped`, and `skipped`
    is not `clear` (exit 2). `--dry-run` executes the repros only;
-5. `council doctor` fails when fewer than three distinct models are configured.
+5. `council doctor` fails when fewer than three distinct models are configured;
+6. `review` and the Stop hook run **read-only**: reviewers read and grep, the council runs
+   the repros. dsh's workspace-write sandbox fails every shell call on this machine, which
+   cost 420-506 s per review; read-only is ~75 s for the same voice. A timeout is retried
+   once at >= 600 s even when two agents already answered.
 The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are unchanged.
-181 unit tests green.
+185 unit tests green.
 
 ## Next (max 3)
 1. One real `council drain` on yt-stories (7 confirmed: 5 fixable, 2 without a repro) once the
@@ -29,6 +33,15 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
 - Nothing.
 
 ## Verified (dated evidence)
+- **2026-11-19 — why dsh sat out every review, measured.** A 600 s probe of the exact
+  cross-round prompt answered at **506 s**, and its answer named the cause:
+  `sandbox-local windows-acl temp grant materialization failed` on every shell call. In
+  `workspace-write` dsh burns its whole budget failing to start commands; in `read_only`
+  (consult) the same voice answers in ~75 s. `review` and the Stop hook now default to
+  `read_only`; `--posture shell` remains for manual deep runs. Together with the retry fix
+  (`needs_lean_retry` on any timeout, >= 600 s) and the cross-prompt tool budget, all three
+  voices are asked on every run.
+- **2026-11-19 — the council reviewed its own fix (run `20261119-175305`): BLOCK, 2 major
 - **2026-11-19 — the council reviewed its own fix (run `20261119-175305`): BLOCK, 2 major
   confirmed, both fixed.**
   1. `pending_is_news` returned True for any decision other than `advisory`, so an `approve`
