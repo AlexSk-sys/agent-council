@@ -42,7 +42,6 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
   (`needs_lean_retry` on any timeout, >= 600 s) and the cross-prompt tool budget, all three
   voices are asked on every run.
 - **2026-11-19 — the council reviewed its own fix (run `20261119-175305`): BLOCK, 2 major
-- **2026-11-19 — the council reviewed its own fix (run `20261119-175305`): BLOCK, 2 major
   confirmed, both fixed.**
   1. `pending_is_news` returned True for any decision other than `advisory`, so an `approve`
      consult with unproven findings still wrote `pending.md`; it now reports only a `block`

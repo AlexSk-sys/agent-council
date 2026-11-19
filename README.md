@@ -138,13 +138,15 @@ put it in the rotation.
 
 | posture | read | run commands | edit files |
 |---|---|---|---|
-| read_only | yes | no | no |
-| shell (default) | yes | yes | no |
+| read_only (default for `review` and `consult`) | yes | no | no |
+| shell | yes | yes | no |
 | autonomous | yes | yes | yes |
 
-Planners and reviewers run `shell`: they can prove a claim by running it, but they cannot edit the
-code they are reviewing. In `work`, exactly one agent is promoted to `autonomous` and is the only
-writer — three writers on one working tree is a race, not a review.
+Planners and reviewers run `read_only` by default: the council executes every REPRO itself in the
+disposable snapshot, so a reviewer does not need shell to prove a claim — and on this machine
+dsh's workspace-write sandbox fails every shell call, which cost 420-506 s per review. Use
+`--posture shell` for a manual deep run. In `work`, exactly one agent is promoted to `autonomous`
+and is the only writer — three writers on one working tree is a race, not a review.
 
 ## Output contract
 

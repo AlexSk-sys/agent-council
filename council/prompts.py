@@ -88,8 +88,8 @@ Rules:
 REVIEW_DIFF = HEADER + """
 A change was just made in this repository and must be checked before it is
 accepted. Your job is to find defects in the change below. You have the real
-repository: read the surrounding code, run commands, and verify every claim
-before you make it.
+repository: read the surrounding code and verify every claim before you make
+it. Use only the capabilities listed above.
 
 YOUR LENS: {lens}
 Your peers cover the other lenses, so go deep on yours instead of repeating
@@ -230,9 +230,10 @@ Rules:
 
 VERIFY_FINDINGS = HEADER + """
 A first review round produced the findings below. Your job is to REFUTE them,
-not to agree. For each numbered finding, read the code and run its REPRO when
-one is present. CONFIRM only if the defect is real and would cause the stated
-harm; REFUTE if it is wrong, already handled, or cannot happen.
+not to agree. For each numbered finding, read the code; run its REPRO when one
+is present and your capabilities allow it - the council executes every REPRO
+itself afterwards. CONFIRM only if the defect is real and would cause the
+stated harm; REFUTE if it is wrong, already handled, or cannot happen.
 
 FINDINGS:
 {findings}

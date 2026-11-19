@@ -328,6 +328,25 @@ class TestParallelism(unittest.TestCase):
         self.assertLess(elapsed, 1.5, f"took {elapsed:.2f}s — agents ran sequentially")
 
 
+class TestReadOnlyDefault(unittest.TestCase):
+    """A review must default to read_only: dsh's shell sandbox fails here."""
+
+    def test_review_defaults_to_read_only(self):
+        import inspect
+        from council import protocol as protocol_mod
+        from council.cli import build_parser
+
+        sig = inspect.signature(protocol_mod.run_diff_review)
+        self.assertEqual(sig.parameters["posture"].default, "read_only")
+        self.assertEqual(build_parser().parse_args(["review"]).posture,
+                         "read_only")
+
+    def test_the_cross_prompt_promises_no_shell(self):
+        text = prompts.verify_findings_prompt("dsh", "p", "0. [major] x", False, "")
+        self.assertIn("CANNOT run shell commands", text)
+        self.assertIn("council executes every REPRO", text)
+
+
 class TestNeedsLeanRetry(unittest.TestCase):
     def test_two_answers_with_a_timeout_still_retry(self):
         self.assertTrue(needs_lean_retry({"claude": "approve",

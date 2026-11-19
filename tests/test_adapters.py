@@ -125,6 +125,23 @@ class TestModelForwarding(unittest.TestCase):
         self.assertIn("exit 3", res.error)
         self.assertIn("provider reset", res.error)
 
+    def test_dsh_read_only_uses_the_read_only_preset(self):
+        cfg = AgentConfig(name="dsh", model="opencode-go/deepseek-v4.1-flash",
+                          posture="read_only")
+        done = _Finished(0, "PONG", "")
+        with mock.patch.object(adapters, "_run", return_value=(done, 5, "")) as run:
+            adapters.run_dsh("hi", ".", cfg)
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index("--permission-mode") + 1], "read-only")
+
+    def test_opencode_read_only_omits_auto(self):
+        cfg = AgentConfig(name="opencode", model="opencode-go/qwen3.8-flash",
+                          posture="read_only")
+        done = _Finished(0, '{"type":"text","part":{"type":"text","text":"PONG"}}\n', "")
+        with mock.patch.object(adapters, "_run", return_value=(done, 5, "")) as run:
+            adapters.run_opencode("hi", ".", cfg)
+        self.assertNotIn("--auto", run.call_args.args[0])
+
     def test_opencode_reports_an_effort_it_cannot_use(self):
         cfg = AgentConfig(name="opencode", model="opencode-go/qwen3.8-flash",
                           effort="high")
