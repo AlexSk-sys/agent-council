@@ -29,6 +29,12 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
 - Nothing.
 
 ## Verified (dated evidence)
+- **2026-11-19 — the two defects the council found in the new pipeline are fixed.** A no-diff
+  consult no longer reaches the majority-vote rule: two block votes with no proven finding
+  return `approve`, and `advisory` is reserved for a confirmed blocker/major. A merged entry
+  now keeps `extra_repros` when two peers report different defects at the same `file:line`,
+  and `drain` requires **every** repro to flip (`repro_after=[0,1]` -> "still open: 1 of 2").
+  178 tests OK.
 - **2026-11-19 — noise cut and real closure.** Real run `20261118-233507` (yt-stories, 3 models):
   17 raw findings -> 14 after root-cause merge -> 9 confirmed blocker/major -> 8 new + 1 known
   open. `council drain --dry-run` on run `20261118-235542`: 7 confirmed, 5 "would fix", 2

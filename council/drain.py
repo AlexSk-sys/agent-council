@@ -46,7 +46,17 @@ def _finding_from_dict(raw: dict) -> Finding:
         repro_output=str(raw.get("repro_output") or ""),
         status=str(raw.get("status") or "confirmed"),
         checks=list(raw.get("checks") or []),
+        extra_repros=[str(c) for c in (raw.get("extra_repros") or []) if c],
     )
+
+
+def all_repros(finding: Finding) -> list[str]:
+    """Every repro of a merged entry: all of them must flip to zero."""
+    out: list[str] = []
+    for cmd in ([finding.repro] if finding.repro else []) + list(finding.extra_repros):
+        if cmd and cmd not in out:
+            out.append(cmd)
+    return out
 
 
 def load_confirmed(run_dir: Path) -> list[Finding]:
@@ -111,18 +121,20 @@ def run_drain(
         item = {"key": finding_key(finding), "file": finding.file,
                 "line": finding.line, "severity": finding.severity,
                 "issue": finding.issue[:300], "state": ""}
-        if not finding.repro:
+        repros = all_repros(finding)
+        if not repros:
             item["state"] = "skipped: no repro to prove the fix"
             report["skipped"] += 1
-        elif not project_mod.repro_allowed(finding.repro):
+        elif any(not project_mod.repro_allowed(cmd) for cmd in repros):
             item["state"] = "skipped: repro command not allowed"
             report["skipped"] += 1
         else:
-            before = project_mod.run_command(
-                finding.repro, project, project_mod.REPRO_TIMEOUT_S)
-            item["repro_before"] = before["code"]
-            if before["code"] == 0:
-                item["state"] = "already fixed: repro exits 0"
+            before = [project_mod.run_command(cmd, project,
+                                              project_mod.REPRO_TIMEOUT_S)["code"]
+                      for cmd in repros]
+            item["repro_before"] = before
+            if all(code == 0 for code in before):
+                item["state"] = "already fixed: every repro exits 0"
                 report["already"] += 1
             elif dry_run:
                 item["state"] = "would fix"
@@ -130,7 +142,7 @@ def run_drain(
             else:
                 attempted += 1
                 item.update(_fix_one(project, store, cfg, executor, finding, item,
-                                     options, on_done))
+                                     options, on_done, repros))
                 if item["state"] == "fixed":
                     report["fixed"] += 1
                 elif item["state"] == "verify failed":
@@ -158,9 +170,11 @@ def run_drain(
 
 
 def _fix_one(project: Path, store: RunStore, cfg: AgentConfig, executor: str,
-             finding: Finding, item: dict, options: dict, on_done) -> dict:
-    brief = (_finding_line(finding)
-             + f"\n  REPRO (the acceptance test, must exit 0 when fixed): {finding.repro}")
+             finding: Finding, item: dict, options: dict, on_done,
+             repros: list[str]) -> dict:
+    listed = "\n".join(f"  REPRO {n} (acceptance test, must exit 0 when fixed): {cmd}"
+                       for n, cmd in enumerate(repros, 1))
+    brief = _finding_line(finding) + "\n" + listed
     result = run_agent(
         executor,
         prompts.fix_prompt(executor, str(project), [brief], True),
@@ -175,11 +189,14 @@ def _fix_one(project: Path, store: RunStore, cfg: AgentConfig, executor: str,
     if not result.ok:
         return {"state": f"error: executor failed: {result.error[:160]}"}
 
-    after = project_mod.run_command(finding.repro, project, project_mod.REPRO_TIMEOUT_S)
-    item["repro_after"] = after["code"]
-    if after["code"] != 0:
-        return {"state": "still open: repro still exits non-zero",
-                "repro_output": after["output"][-400:]}
+    results = [project_mod.run_command(cmd, project, project_mod.REPRO_TIMEOUT_S)
+               for cmd in repros]
+    item["repro_after"] = [r["code"] for r in results]
+    failing = [r for r in results if r["code"] != 0]
+    if failing:
+        return {"state": f"still open: {len(failing)} of {len(repros)} repro(s) "
+                         f"still exit non-zero",
+                "repro_output": failing[0]["output"][-400:]}
 
     if options.get("verify"):
         failures = [r for r in project_mod.run_verify(project) if r.get("code") != 0]

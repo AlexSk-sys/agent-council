@@ -261,6 +261,10 @@ class Finding:
     repro_output: str = ""
     status: str = ""  # "", "unverified", "confirmed", "refuted"
     checks: list[str] = field(default_factory=list)
+    # When two peers describe different defects at the same file:line, the
+    # merged entry keeps every repro: drain must flip all of them, or it would
+    # prove one defect fixed and call the other one clear.
+    extra_repros: list[str] = field(default_factory=list)
 
     @property
     def has_evidence(self) -> bool:
@@ -283,6 +287,7 @@ class Finding:
             "repro_output": self.repro_output,
             "status": self.status,
             "checks": self.checks,
+            "extra_repros": self.extra_repros,
         }
 
 
@@ -356,7 +361,7 @@ def merge_findings(findings: list[Finding]) -> list[Finding]:
                 severity=f.severity, issue=f.issue, evidence=f.evidence,
                 source=f.source, file=f.file, line=f.line, fix=f.fix,
                 repro=f.repro, repro_output=f.repro_output, status=f.status,
-                checks=list(f.checks),
+                checks=list(f.checks), extra_repros=list(f.extra_repros),
             )
             continue
         if SEVERITY_ORDER.get(f.severity, 9) < SEVERITY_ORDER.get(first.severity, 9):
@@ -374,6 +379,9 @@ def merge_findings(findings: list[Finding]) -> list[Finding]:
                 first.evidence = (first.evidence + " | " + f.evidence)[:1500]
         if not first.repro and f.repro:
             first.repro = f.repro
+        for cmd in ([f.repro] if f.repro else []) + list(f.extra_repros):
+            if cmd and cmd != first.repro and cmd not in first.extra_repros:
+                first.extra_repros.append(cmd)
         if not first.fix and f.fix:
             first.fix = f.fix
         for check in f.checks:
@@ -1006,11 +1014,12 @@ def decide_consult(verdicts: dict[str, str], findings: list[Finding],
     come back as a pile of "new errors" about code the user did not touch.
     """
     if not has_diff:
+        # No change, no veto - not even from a majority vote. A vote without a
+        # confirmed finding is an opinion, and an opinion about code nobody
+        # edited must not turn a question into a BLOCK.
         confirmed = [f for f in findings
                      if f.status == "confirmed" and f.severity in ("blocker", "major")]
-        if confirmed:
-            return "advisory"
-        return decide_review(verdicts, findings)
+        return "advisory" if confirmed else "approve"
     return decide_review(verdicts, findings, known, changed)
 
 

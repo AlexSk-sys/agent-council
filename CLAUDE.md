@@ -162,12 +162,15 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     when the current diff touches its file, so an unrelated turn cannot re-veto
     an old backlog item. `append_lessons` runs after the index is read, and
     `exclude_run` keeps a run from recognising its own fresh findings.
-25. **A consult without a diff is ADVISORY.** No change, no veto: the decision
-    is `advisory` (exit 0) and `pending_is_news` suppresses the message entirely
-    when it would only repeat the checklist. This is what stops every question
-    from coming back as a pile of "new errors". The Stop review with a diff is
-    still the real gate.
-26. **`drain` is the only place a finding is called fixed.** For each confirmed
+25. **A consult without a diff is ADVISORY.** No change, no veto: not even a
+    majority of block votes can block, and the verdict is `advisory` (exit 0)
+    only when a confirmed blocker/major exists, otherwise `approve`.
+    `pending_is_news` suppresses the message entirely when it would only repeat
+    the checklist. This is what stops every question from coming back as a pile
+    of "new errors". The Stop review with a diff is still the real gate.
+26. **`drain` is the only place a finding is called fixed.** A merged entry may
+    carry `extra_repros` when two peers described different defects at the same
+    `file:line`; every repro must flip, never just the first. For each confirmed
     blocker/major: run its REPRO in the live tree (exit 0 = already gone) →
     one executor fixes → re-run the same REPRO (exit 0 = fixed) → verify command
     green. A finding without a repro is `skipped`, and `skipped` is not `clear`

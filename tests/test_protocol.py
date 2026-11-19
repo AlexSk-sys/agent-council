@@ -1700,6 +1700,15 @@ class TestRootCauseMerge(unittest.TestCase):
         ])
         self.assertEqual(len(merged), 2)
 
+    def test_same_line_with_different_repros_keeps_every_repro(self):
+        merged = merge_findings([
+            self._f("dsh", status="confirmed", repro="a"),
+            self._f("claude", status="confirmed", repro="b"),
+        ])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].repro, "a")
+        self.assertEqual(merged[0].extra_repros, ["b"])
+
     def test_a_refuted_peer_beats_an_unproven_one(self):
         merged = merge_findings([
             self._f("dsh", status="unverified"),
@@ -1757,6 +1766,9 @@ class TestKnownOpen(unittest.TestCase):
         self.assertEqual(decide_consult(verdicts, [finding], {}, has_diff=True), "block")
         self.assertEqual(decide_consult({"dsh": "approve"}, [], {}, has_diff=False),
                          "approve")
+        # Two block votes with no proven finding are still not a veto.
+        self.assertEqual(decide_consult({"dsh": "block", "claude": "block"}, [],
+                                        {}, has_diff=False), "approve")
 
 
 class TestPendingIsNews(unittest.TestCase):

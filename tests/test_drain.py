@@ -26,10 +26,11 @@ REPRO_NEEDS_FILE = (
 )
 
 
-def finding(repro, severity="blocker", file="a.py", line=1, issue="boom"):
+def finding(repro, severity="blocker", file="a.py", line=1, issue="boom",
+            extra_repros=None):
     return {"severity": severity, "issue": issue, "evidence": "read a.py:1",
             "source": "dsh", "file": file, "line": line, "repro": repro,
-            "status": "confirmed"}
+            "status": "confirmed", "extra_repros": list(extra_repros or [])}
 
 
 def write_run(root: Path, findings: list[dict]) -> Path:
@@ -90,6 +91,23 @@ class TestDrain(unittest.TestCase):
             self.assertEqual(drain.exit_code(report), 0)
             self.assertTrue((run / "drained.md").exists())
             self.assertIn("fixed", report["items"][0]["state"])
+
+    def test_every_repro_of_a_merged_entry_must_flip(self):
+        """One defect fixed, another on the same line still open: not clear."""
+        def fake(agent, _prompt, cwd, _cfg):
+            (Path(cwd) / "fixed.txt").write_text("done", encoding="utf-8")
+            return AgentResult(agent=agent, ok=True, text="fixed one of two")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = write_run(root, [finding(REPRO_NEEDS_FILE,
+                                           extra_repros=[REPRO_FAILS])])
+            with mock.patch("council.drain.run_agent", side_effect=fake):
+                report = drain.run_drain(root, run)
+            self.assertEqual(report["fixed"], 0)
+            self.assertEqual(report["open"], 1)
+            self.assertEqual(report["items"][0]["repro_after"], [0, 1])
+            self.assertIn("1 of 2 repro", report["items"][0]["state"])
 
     def test_an_executor_that_does_nothing_leaves_the_item_open(self):
         with tempfile.TemporaryDirectory() as tmp:
