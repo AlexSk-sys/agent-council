@@ -40,6 +40,13 @@ The verify/snapshot/lenses/repro/cross pipeline and the adaptive tiers are uncha
 - Nothing.
 
 ## Verified (dated evidence)
+- **2026-11-19 — all three voices, controlled, evidence saved.** A review of `676d564` in a
+  fresh worktree: round 1 **claude 39 s · dsh 167 s · opencode 85 s**; cross **58 / 108 /
+  109 s**; every event `ok=True`. Files:
+  `.council/evidence/check-20261119-211704-review-status-md-7-council-proto.*`. The consult
+  retry no longer caps at 240 s (less than the 420 s that had already timed out); both
+  modes retry at `max(timeout, 600)`. Across all saved runs dsh answers 85 times and fails
+  6 (93.4%), median 150-158 s.
 - **2026-11-19 — provisional verdict measured.** A read-only review of commit `2b91a4f` on a
   fresh worktree, `--background`: the **provisional** verdict landed in `pending.md` at
   **245 s** (`[background council review (provisional)] BLOCK: 3 new ...`), the final verdict

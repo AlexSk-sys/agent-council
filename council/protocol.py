@@ -1183,12 +1183,11 @@ def _lean_retry(store, ctx, agents: list[str], cfgs: dict[str, AgentConfig],
     # on the .cmd shim argv and was cut at its first newline (the recovery
     # could never deliver its prompt). It also dropped model/extra_args, which
     # would have sent the retry to a different backend than round 1.
-    # A review retries with MORE time on a smaller prompt: 240 s was a second
-    # guaranteed loss for dsh. A consult must stay a quick side-opinion, so it
-    # caps the retry instead of doubling the wait.
+    # A timed-out voice is retried with MORE time on a smaller prompt. A 240 s
+    # retry after a 420 s timeout was a second guaranteed loss for the slowest
+    # harness - that is how the council kept running 2-of-3.
     lean_cfgs = {
-        a: replace(cfgs[a], timeout_s=(240 if mode == "consult"
-                                       else max(cfgs[a].timeout_s, 600)))
+        a: replace(cfgs[a], timeout_s=max(cfgs[a].timeout_s, 600))
         for a in failed
     }
     diff_cut = (diff or "")[:15000]

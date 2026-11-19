@@ -416,7 +416,8 @@ class TestLeanRetry(unittest.TestCase):
             captured = self._run(cfgs, {"claude": "timeout"})
             self.assertEqual(len(captured), 1, "lean retry did not call the agent")
             args, timeout_s = captured[0]
-            self.assertEqual(timeout_s, 240, "a consult retry stays a quick side-opinion")
+            self.assertEqual(timeout_s, 600,
+                             "a timed-out voice needs more time, not less")
             self.assertIn("--model", args)
             self.assertIn("m1", args)
             self.assertIn("--x", args)
