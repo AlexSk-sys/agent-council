@@ -6,7 +6,7 @@ they review, and in `work` mode fix, each other's output. Single package, stdlib
 
 ## Commands
 ```powershell
-py -3 -m unittest discover -s tests -v      # verify (181 tests, no network)
+py -3 -m unittest discover -s tests -v      # verify (198 tests, no network)
 py -3 -m pip install -e .                   # installs the `council` entry point
 council doctor                              # prove all 3 harnesses answer headless
 council review --path sandbox               # cross-review a diff
@@ -166,10 +166,10 @@ A project overrides any of them in `.council/config.json` under `overrides.<agen
     majority of block votes can block, and the verdict is `advisory` (exit 0)
     only when a confirmed blocker/major exists, otherwise `approve`.
     `pending_is_news` suppresses the message entirely when it would only repeat
-    the checklist. A no-diff consult runs **one round**: a cross-examination of
-    untouched code doubles the wait and changes no verdict. This is what stops
-    every question from coming back as a pile of "new errors". The Stop review
-    with a diff is still the real gate.
+    the checklist. The cross round stays: skipping it loses peer-confirmed
+    findings (measured - a no-diff consult flipped advisory/confirmed to
+    approve/unverified). This is what stops every question from coming back as
+    a pile of "new errors". The Stop review with a diff is still the real gate.
 26. **`drain` is the only place a finding is called fixed.** A merged entry may
     carry `extra_repros` when two peers described different defects at the same
     `file:line`; every repro must flip, never just the first. For each confirmed

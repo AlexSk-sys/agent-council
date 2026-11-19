@@ -1102,15 +1102,13 @@ def decide_consult(verdicts: dict[str, str], findings: list[Finding],
 def _finalize_review(store, ctx: ReviewContext, verdicts: dict[str, str],
                      findings: list[Finding], agents: list[str],
                      cfgs: dict[str, AgentConfig], on_done, *,
-                     consult: bool = False, has_diff: bool = False,
-                     cross_allowed: bool = True):
+                     consult: bool = False, has_diff: bool = False):
     # One defect, one entry - merged BEFORE the repros run, so a merged entry
     # carries every peer's repro and `verify_repros` can require all of them.
     findings[:] = merge_findings(findings)
     project_mod.verify_repros(ctx.workdir, findings)
     before = len(findings)
-    cross_results = (_cross_round(store, ctx, agents, cfgs, findings, on_done)
-                     if cross_allowed else [])
+    cross_results = _cross_round(store, ctx, agents, cfgs, findings, on_done)
     fresh = merge_findings(findings[before:])
     project_mod.verify_repros(ctx.workdir, fresh)
     findings[:] = merge_findings(findings[:before] + fresh)
@@ -1743,10 +1741,7 @@ def run_session_consult(
 
         cross_results, decision, _, known = _finalize_review(
             store, ctx, verdicts, findings, agents, cfgs, on_done,
-            consult=True, has_diff=bool(diff.strip()),
-            # A quick opinion about untouched code does not earn a second
-            # round: it would double the wait and change no verdict.
-            cross_allowed=bool(diff.strip()))
+            consult=True, has_diff=bool(diff.strip()))
         results = results + cross_results
         synthesis = render_consult_synthesis(decision, verdicts, findings,
                                              user_message, diff_stat, ctx.isolation, stamp,

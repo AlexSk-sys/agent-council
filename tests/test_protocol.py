@@ -911,22 +911,6 @@ class TestSessionConsult(unittest.TestCase):
             self.assertEqual(out.decision, "block")
             self.assertEqual(out.findings[0].status, "confirmed")
 
-    def test_consult_without_a_diff_does_not_run_a_cross_round(self):
-        calls: list[str] = []
-
-        def fake(agent, prompt, *_args):
-            calls.append(agent)
-            return AgentResult(agent=agent, ok=True,
-                               text="VERDICT: BLOCK\nFINDING: major | a.py:1 | boom | read a.py:1")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._force_cross(root)
-            with mock.patch("council.protocol.run_agent", side_effect=fake):
-                out = run_session_consult(root, "hello")
-            self.assertEqual(len(calls), 3, "a no-diff consult must stay one round")
-            self.assertFalse((out.run_dir / "r2").exists())
-
     def test_consult_without_a_diff_is_advisory_not_a_veto(self):
         """A question about untouched code must not come back as a blocker."""
         texts = {"dsh": "VERDICT: BLOCK\n"
